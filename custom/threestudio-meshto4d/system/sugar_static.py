@@ -22,6 +22,7 @@ from ..geometry.sugar import SuGaRModel
 from ..utils.sugar_utils import SuGaRRegularizer
 from torchvision.utils import save_image
 from extern.ldm_zero123.modules.evaluate.evaluate_perceptualsim import perceptual_sim, ssim_metric, psnr
+from ..utils.loss_utils import ssim
 
 
 @threestudio.register("sugar-static-system")
@@ -173,6 +174,9 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
 
             # mask loss
             set_loss("mask", F.mse_loss(gt_mask.float(), out["comp_mask"]))
+            
+            # SSIM loss
+            set_loss("ssim", 1 - ssim(gt_rgb, out["comp_rgb"] * gt_mask.float()))
             
 
             # depth loss
