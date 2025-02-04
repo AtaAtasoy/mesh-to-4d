@@ -142,8 +142,8 @@ class DynamicSuGaRModel(SuGaRModel):
         elif self.dynamic_mode == "deformation":
             deformation_args = ModelHiddenParams(None)
             deformation_args.no_dr = False
-            deformation_args.no_ds = not (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs") # False
-            deformation_args.no_do = not (self.cfg.skinning_method == "hybrid") # False
+            deformation_args.no_ds = not (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs")
+            deformation_args.no_do = not (self.cfg.skinning_method == "hybrid")
 
             self._deformation = DeformationNetwork(deformation_args)
             self._deformation_table = torch.empty(0)
@@ -335,15 +335,18 @@ class DynamicSuGaRModel(SuGaRModel):
     ) -> Meshes:
         n_t = len(timestamp) if timestamp is not None else len(frame_idx)
         deformed_vert_pos = self.get_timed_vertex_xyz(timestamp, frame_idx)
-        # threestudio.info(f"deformed_vert_pos shape: {deformed_vert_pos.shape}")
+        if torch.all(self._vertex_colors == 0.5):
+            textures = self.torch3d_mesh.extend(n_t).textures # TexturesUV
+        else:
+            textures = TexturesVertex(
+                verts_features=torch.stack([self._vertex_colors] * n_t, dim=0).clamp(0, 1).to(self.device)
+            )
         
         surface_mesh = Meshes(
             # verts=self.get_timed_xyz_vertices(timestamp, frame_idx),
             verts=deformed_vert_pos,
             faces=torch.stack([self._surface_mesh_faces] * n_t, dim=0),
-            textures=TexturesVertex(
-                verts_features=torch.stack([self._vertex_colors] * n_t, dim=0).clamp(0, 1).to(self.device)
-            )
+            textures=textures
         )
         return surface_mesh
 
@@ -751,13 +754,12 @@ class DynamicSuGaRModel(SuGaRModel):
         xyz_verts = self.get_xyz_verts
         self._xyz_cpu = xyz_verts.cpu().numpy()
         torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path], device=self.device)
-        
+            
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices =  o3d.utility.Vector3dVector(torch3d_mesh.verts_list()[0].cpu().numpy())
         mesh.triangles = o3d.utility.Vector3iVector(torch3d_mesh.faces_list()[0].cpu().numpy())
         mesh.vertex_normals = o3d.utility.Vector3dVector(torch3d_mesh.verts_normals_list()[0].cpu().numpy())
-        threestudio.info(f"Mesh that deformation graph is built on has {len(mesh.vertices)} vertices and {len(mesh.triangles)} faces.")
-        
+
         if xyz_nodes is None:
             downpcd = mesh.sample_points_uniformly(number_of_points=n_nodes)
             # downpcd = mesh.sample_points_poisson_disk(number_of_points=1000, pcl=downpcd)

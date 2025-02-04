@@ -56,6 +56,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
         length_inter_frames: float = 0.2
         
         dynamic_stage: bool = True
+        render_mesh: bool = True
 
 
     cfg: Config
@@ -81,6 +82,10 @@ class SuGaR4DGen(BaseSuGaRSystem):
 
     def forward(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         self.geometry.update_learning_rate(self.global_step)
+        if self.cfg.render_mesh:
+            batch["timed_surface_mesh"] = self.geometry.get_timed_surface_mesh(
+                    timestamp=batch["timestamp"], frame_idx=batch["frame_indices"]
+                )
         outputs = self.renderer.batch_forward(batch)
         return outputs
 
@@ -164,7 +169,10 @@ class SuGaR4DGen(BaseSuGaRSystem):
         if guidance == "ref":
             gt_mask = batch["mask"]
             gt_rgb = batch["rgb"]
-
+            
+            mesh_rgb = out["mesh_comp_rgb"]
+            set_loss("mesh_rgb", F.mse_loss(mesh_rgb, gt_rgb))
+            
             # color loss
             #gt_rgb = gt_rgb * gt_mask.float()
 
@@ -173,10 +181,12 @@ class SuGaR4DGen(BaseSuGaRSystem):
             set_loss("mask", F.mse_loss(gt_mask.float(), out["comp_mask"]))
 
             ref_psnr = self.psnr(out["comp_rgb"], gt_rgb)
+            ref_mesh_psnr = self.psnr(out["mesh_comp_rgb"], gt_rgb)
             # ref_ssim = self.ssim(out["comp_rgb"], gt_rgb)
             # ref_lpips = self.lpips(out["comp_rgb"], gt_rgb)
 
             self.log(f"metric/PSNR", ref_psnr)
+            self.log(f"metric/Mesh_PSNR", ref_mesh_psnr)
             # self.log(f"metric/SSIM", ref_ssim)
             # self.log(f"metric/LPIPS", ref_lpips)
 
@@ -241,10 +251,22 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 guidance_eval=guidance_eval,
             )
             set_loss("sds_zero123", guidance_out["loss_sds"])
-
-            zero123_img = out["comp_rgb"]
+            
+            guidance_mesh_out = self.guidance_zero123(
+                out["mesh_comp_rgb"],
+                **batch,
+                rgb_as_latents=False,
+                guidance_eval=guidance_eval,
+            )
+            set_loss("sds_mesh_zero123", guidance_mesh_out["loss_sds"])            
             if self.true_global_step % 200 == 0:
+                zero123_img = out["comp_rgb"]
+                mesh_rgbs = out["mesh_comp_rgb"]
+                mesh_masks = out["mesh_comp_mask"]
                 img1, img2, img3, img4 = zero123_img[0], zero123_img[1], zero123_img[2], zero123_img[3]
+                mesh1, mesh2, mesh3, mesh4 = mesh_rgbs[0], mesh_rgbs[1], mesh_rgbs[2], mesh_rgbs[3]
+                mask1, mask2, mask3, mask4 = mesh_masks[0], mesh_masks[1], mesh_masks[2], mesh_masks[3]
+                
                 self.save_image_grid(
                     f"dynamic_rgb_{self.true_global_step}.png",
                     imgs=[
@@ -269,8 +291,48 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             "type": "rgb",
                             "img": img4,
                             "kwargs": {"data_format": "HWC"},
-                        },                    
-                    ]
+                        },
+                        {
+                            "type": "rgb",
+                            "img": mesh1,
+                            "kwargs": {"data_format": "HWC"},
+                        },
+                        {
+                            "type": "rgb",
+                            "img": mesh2,
+                            "kwargs": {"data_format": "HWC"},
+                        },
+                        {
+                            "type": "rgb",
+                            "img": mesh3,
+                            "kwargs": {"data_format": "HWC"},
+                        },
+                        {
+                            "type": "rgb",
+                            "img": mesh4,
+                            "kwargs": {"data_format": "HWC"},
+                        }, 
+                        {
+                            "type": "grayscale",
+                            "img": mask1,
+                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                        },
+                        {
+                            "type": "grayscale",
+                            "img": mask2,
+                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                        },
+                        {
+                            "type": "grayscale",
+                            "img": mask3,
+                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                        },
+                        {
+                            "type": "grayscale",
+                            "img": mask4,
+                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                        },                   
+                    ],
                 )
 
         # Regularization
@@ -627,24 +689,19 @@ class SuGaR4DGen(BaseSuGaRSystem):
 
     def on_predict_epoch_end(self) -> None:
         self.texture_img = self.texture_img / self.texture_counter.clamp(min=1)
-        # torch3d_mesh = load_objs_as_meshes([self.geometry.cfg.surface_mesh_to_bind_path.replace('.ply', '.obj')], device=self.device)
-        torch3d_mesh = load_objs_as_meshes(["input/meshes/cow_centered_scaled/cow_centered_scaled.obj"], device=self.device)
-        threestudio.info(f"torch3d_mesh verts: {torch3d_mesh.verts_list()[0].shape}, faces: {torch3d_mesh.faces_list()[0].shape}")
         
-        # self.geometry.cfg.surface_mesh_to_bind_path 
-
         video_length = 16
         timestamps = torch.as_tensor(
             np.linspace(0, 1, video_length+2, endpoint=True), dtype=torch.float32
         )[1:-1].to(self.device)
-
+        
         # textures_uv = TexturesUV(
         #     maps=self.texture_img[None],
         #     verts_uvs=self.verts_uv[None],
         #     faces_uvs=self.faces_uv[None],
         #     sampling_mode='nearest',
         # )
-        textures_uv = torch3d_mesh.textures
+        textures_uv = self.geometry.torch3d_mesh.textures
 
         mesh_save_dir = os.path.join(self.get_save_dir(), f"extracted_textured_meshes")
         os.makedirs(mesh_save_dir, exist_ok=True)
@@ -660,11 +717,8 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 textures=textures_uv
             )
             
-            # threestudio.info("Texture extracted.")        
-            # threestudio.info("Saving textured mesh...")
-            
             mesh_save_path = os.path.join(
-                mesh_save_dir, f"extracted_mesh_{i}.obj"
+                mesh_save_dir, f"{i}.obj"
             )
             with torch.no_grad():
                 save_obj(  

@@ -17,14 +17,12 @@ from pytorch3d.renderer import (
     AmbientLights,
     look_at_view_transform,
     BlendParams,
-    MeshRenderer,
 )
 from dreifus.camera import CameraCoordinateConvention
 from dreifus.matrix import Pose
 import cv2
 import shutil
 from rembg import remove
-from Depth2Normal import Depth2Normal
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Render multi-view images.")
@@ -49,7 +47,6 @@ RESULTS_PATH = f"{output_path}"
 # Configuration
 NUM_VIEWS = 256
 BATCH_SIZE = 256
-depth2normal = Depth2Normal()
 
 # Load the mesh
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -350,8 +347,6 @@ for split, split_indices in indices.items():
             
 
             param = {
-                "w2c": w2c.tolist(),
-                "w2c_opencv": cam_2_world_opencv.invert().numpy().tolist(),
                 "intrinsics": {
                     "height": RESOLUTION,
                     "width": RESOLUTION,

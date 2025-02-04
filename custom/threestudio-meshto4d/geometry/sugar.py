@@ -118,6 +118,7 @@ class SuGaRModel(BaseGeometry):
         self.training_setup()
 
     def prune_isolated_points(self, verts, faces, vert_colors):
+        print(f"Pruning isolated points from {len(verts)} verts and {len(faces)} faces...")
         # bfs pruning
         orn = get_one_ring_neighbors(faces)
 
@@ -145,6 +146,7 @@ class SuGaRModel(BaseGeometry):
 
         assert book is not None
         assert connected_verts_num != 0
+        print(f"Pruned {verts_num - connected_verts_num} isolated points.")
         vert_idx_kept = np.where(book == 1)[0]
         new_vert_idx = np.arange(len(vert_idx_kept), dtype=int)
         mapping_old2new = dict(zip(vert_idx_kept, new_vert_idx))
@@ -174,14 +176,27 @@ class SuGaRModel(BaseGeometry):
         # Load mesh with open3d
         threestudio.info(f"Loading mesh to bind from: {self.cfg.surface_mesh_to_bind_path}...")
         if mesh is None:
-            torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path], device=self.device)
+            self.torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path], device=self.device)
             
             o3d_mesh = o3d.geometry.TriangleMesh()
-            o3d_mesh.vertices =  o3d.utility.Vector3dVector(torch3d_mesh.verts_list()[0].cpu().numpy())
-            o3d_mesh.triangles = o3d.utility.Vector3iVector(torch3d_mesh.faces_list()[0].cpu().numpy())
-            o3d_mesh.vertex_normals = o3d.utility.Vector3dVector(torch3d_mesh.verts_normals_list()[0].cpu().numpy())
+            o3d_mesh.vertices =  o3d.utility.Vector3dVector(self.torch3d_mesh.verts_list()[0].cpu().numpy())
+            o3d_mesh.triangles = o3d.utility.Vector3iVector(self.torch3d_mesh.faces_list()[0].cpu().numpy())
+            o3d_mesh.vertex_normals = o3d.utility.Vector3dVector(self.torch3d_mesh.verts_normals_list()[0].cpu().numpy())
             
-            # o3d_mesh = o3d.io.read_triangle_mesh(self.cfg.surface_mesh_to_bind_path)
+            # threestudio.info("Texture map found, sampling colors from texture map...")
+            
+            # Get UV coordinates and texture map
+            # uv_coords = torch3d_mesh.textures.verts_uvs_list()[0].cpu().numpy()
+            # texture_map = torch3d_mesh.textures.maps_padded()[0].cpu().numpy()
+            
+            # # Sample colors from texture map using UV coordinates
+            # h, w = texture_map.shape[:2]
+            # u = np.clip(uv_coords[:, 0] * (w-1), 0, w-1).astype(int)
+            # v = np.clip(uv_coords[:, 1] * (h-1), 0, h-1).astype(int)
+            # vert_colors = texture_map[v, u]
+
+            # o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vert_colors)
+            
             threestudio.info(f"Center of mesh: {o3d_mesh.get_center()}")
             threestudio.info(f"Number of vertices: {len(o3d_mesh.vertices)}")
             threestudio.info(f"Number of faces: {len(o3d_mesh.triangles)}")
@@ -587,11 +602,15 @@ class SuGaRModel(BaseGeometry):
 
     @property
     def surface_mesh(self):
+        if torch.all(self._vertex_colors == 0.5):
+            textures = self.torch3d_mesh.textures
+        else:
+            textures = TexturesVertex(verts_features=self._vertex_colors[None].clamp(0, 1).to(self.device))
         # Create a Meshes object
         surface_mesh = Meshes(
             verts=[self._points.to(self.device)],
             faces=[self._surface_mesh_faces.to(self.device)],
-            textures=TexturesVertex(verts_features=self._vertex_colors[None].clamp(0, 1).to(self.device)),
+            textures=textures
             # verts_normals=[verts_normals.to(rc.device)],
         )
         return surface_mesh
