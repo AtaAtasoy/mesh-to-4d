@@ -20,16 +20,17 @@ from pytorch3d.renderer import (
 from pytorch3d.renderer.mesh.textures import TexturesVertex
 
 import argparse
+from tqdm import tqdm
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Generate 3D mesh animation video')
 parser.add_argument('--mesh_dir', type=str, default='./meshes',
                     help='Directory containing the mesh files')
+parser.add_argument('--azimuth', type=float, default=0.0, help='Azimuth angle. 0 for the front, training view, [-75, 15, 105, 195] for test views')
 args = parser.parse_args()
 
 # Directory containing the mesh files
 mesh_dir = args.mesh_dir
-output_video_path = os.path.join(os.path.dirname(mesh_dir), "mesh_animation.mp4")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load all meshes
@@ -37,7 +38,6 @@ mesh_filenames = [os.path.join(mesh_dir, f) for f in os.listdir(mesh_dir) if f.e
 
 # Mesh index is the integer before the .obj extension, sort accordingly
 mesh_filenames = sorted(mesh_filenames, key=lambda x: int(os.path.basename(x).split(".")[0]))
-
 
 meshes = load_objs_as_meshes(mesh_filenames, device=device)
 batch_size = len(meshes)
@@ -52,35 +52,41 @@ blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))  # Purple (magenta)
 
 distance = torch.tensor([3.8] * batch_size, device=device)
 elevation = torch.tensor([5.0] * batch_size, device=device)
-azimuth = torch.zeros(batch_size, device=device)
 
-# Camera settings (distance=2.7, elev=0.0, azim=0.0)
-R, T = look_at_view_transform(dist=distance, elev=elevation, azim=azimuth, device=device)
-cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
+for i, azimuth_angle in tqdm(enumerate([-75, 15, 105, 195])):
+    
+    azimuth = torch.tensor([azimuth_angle] * batch_size, device=device)
 
-# Setup lights
-lights = AmbientLights(device=device)
+    # Camera settings (distance=2.7, elev=0.0, azim=0.0)
+    R, T = look_at_view_transform(dist=distance, elev=elevation, azim=azimuth, device=device)
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
 
-# Create renderer
-renderer = MeshRenderer(
-    rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
-    shader=HardPhongShader(
-        device=device,
-        cameras=cameras,
-        lights=lights,
-        blend_params=blend_params
+    # Setup lights
+    lights = AmbientLights(device=device)
+
+    # Create renderer
+    renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
+        shader=HardPhongShader(
+            device=device,
+            cameras=cameras,
+            lights=lights,
+            blend_params=blend_params
+        )
     )
-)
 
-# Render the image
-images = renderer(meshes).cpu().numpy()
+    # Render the image
+    images = renderer(meshes).cpu().numpy()
 
-# Save the images under "mesh_renders" directory
-os.makedirs(os.path.join(mesh_dir, "mesh_renders"), exist_ok=True)
-for i in range(batch_size):
-    plt.imsave(os.path.join(mesh_dir, "mesh_renders", f"frame_{i:04d}.png"), images[i].squeeze())
+    # Save the images under "mesh_renders" directory
+    images_out_dir = os.path.join(mesh_dir, f"eval_{i}")
+    output_video_path = os.path.join(images_out_dir, f"mesh_animation_{azimuth_angle}.mp4")
 
-# Save the images as a video
-with imageio.get_writer(output_video_path, mode='I', fps=10) as writer:
-    for i in tqdm(range(batch_size)):
-        writer.append_data((255*images[i]).astype(np.uint8))
+    os.makedirs(images_out_dir, exist_ok=True)
+    for j in range(batch_size):
+        plt.imsave(os.path.join(images_out_dir, f"{j}.png"), images[j].squeeze())
+
+    # Save the images as a video
+    with imageio.get_writer(output_video_path, mode='I', fps=10) as writer:
+        for j in tqdm(range(batch_size)):
+            writer.append_data((255*images[j]).astype(np.uint8))
