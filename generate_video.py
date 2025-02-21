@@ -26,7 +26,7 @@ from tqdm import tqdm
 parser = argparse.ArgumentParser(description='Generate 3D mesh animation video')
 parser.add_argument('--mesh_dir', type=str, default='./meshes',
                     help='Directory containing the mesh files')
-parser.add_argument('--azimuth', type=float, default=0.0, help='Azimuth angle. 0 for the front, training view, [-75, 15, 105, 195] for test views')
+parser.add_argument('--fps', type=int, default=8, help='fps of the output video')
 args = parser.parse_args()
 
 # Directory containing the mesh files
@@ -44,7 +44,7 @@ batch_size = len(meshes)
 
 # Rendering settings
 raster_settings = RasterizationSettings(
-    image_size=256,   # 256x256 resolution
+    image_size=512,   # 256x256 resolution
     blur_radius=0.0,
     faces_per_pixel=1,
 )
@@ -53,7 +53,7 @@ blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))  # Purple (magenta)
 distance = torch.tensor([3.8] * batch_size, device=device)
 elevation = torch.tensor([5.0] * batch_size, device=device)
 
-for i, azimuth_angle in tqdm(enumerate([-75, 15, 105, 195])):
+for i, azimuth_angle in tqdm(enumerate([-75, 0, 15, 105, 195])):
     
     azimuth = torch.tensor([azimuth_angle] * batch_size, device=device)
 
@@ -87,6 +87,6 @@ for i, azimuth_angle in tqdm(enumerate([-75, 15, 105, 195])):
         plt.imsave(os.path.join(images_out_dir, f"{j}.png"), images[j].squeeze())
 
     # Save the images as a video
-    with imageio.get_writer(output_video_path, mode='I', fps=10) as writer:
+    with imageio.get_writer(output_video_path, mode='I', fps=args.fps) as writer:
         for j in tqdm(range(batch_size)):
             writer.append_data((255*images[j]).astype(np.uint8))
