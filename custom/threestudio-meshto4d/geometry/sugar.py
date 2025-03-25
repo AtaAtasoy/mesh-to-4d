@@ -22,6 +22,7 @@ from pytorch3d.io import load_objs_as_meshes
 
 from .gaussian_base import SH2RGB, RGB2SH
 from ..utils.sugar_utils import get_one_ring_neighbors
+from ..geometry.mesh_utils import convert_to_textureVertex
 
 
 def inverse_sigmoid(x):
@@ -69,6 +70,7 @@ class SuGaRModel(BaseGeometry):
         pred_normal: bool = False
 
         init_gs_scales_s: float = 1.7
+
 
     cfg: Config
 
@@ -176,27 +178,16 @@ class SuGaRModel(BaseGeometry):
         # Load mesh with open3d
         threestudio.info(f"Loading mesh to bind from: {self.cfg.surface_mesh_to_bind_path}...")
         if mesh is None:
-            self.torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path], device=self.device)
+            self.torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path])
+            vertex_textures = convert_to_textureVertex(self.torch3d_mesh.textures, self.torch3d_mesh)
+            
             
             o3d_mesh = o3d.geometry.TriangleMesh()
             o3d_mesh.vertices =  o3d.utility.Vector3dVector(self.torch3d_mesh.verts_list()[0].cpu().numpy())
             o3d_mesh.triangles = o3d.utility.Vector3iVector(self.torch3d_mesh.faces_list()[0].cpu().numpy())
             o3d_mesh.vertex_normals = o3d.utility.Vector3dVector(self.torch3d_mesh.verts_normals_list()[0].cpu().numpy())
-            
-            # threestudio.info("Texture map found, sampling colors from texture map...")
-            
-            # Get UV coordinates and texture map
-            # uv_coords = torch3d_mesh.textures.verts_uvs_list()[0].cpu().numpy()
-            # texture_map = torch3d_mesh.textures.maps_padded()[0].cpu().numpy()
-            
-            # # Sample colors from texture map using UV coordinates
-            # h, w = texture_map.shape[:2]
-            # u = np.clip(uv_coords[:, 0] * (w-1), 0, w-1).astype(int)
-            # v = np.clip(uv_coords[:, 1] * (h-1), 0, h-1).astype(int)
-            # vert_colors = texture_map[v, u]
-
-            # o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vert_colors)
-            
+            o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_textures.verts_features_list()[0].cpu().numpy())
+                        
             threestudio.info(f"Center of mesh: {o3d_mesh.get_center()}")
             threestudio.info(f"Number of vertices: {len(o3d_mesh.vertices)}")
             threestudio.info(f"Number of faces: {len(o3d_mesh.triangles)}")

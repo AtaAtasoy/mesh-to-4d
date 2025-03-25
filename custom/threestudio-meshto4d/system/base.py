@@ -252,44 +252,45 @@ class BaseSuGaRSystem(BaseLift3DSystem):
 
     @torch.no_grad()
     def predict_step(self, batch, batch_idx):
-        batch_size = batch["c2w"].shape[0]
-        assert batch_size == 1, "Now only support batch size = 1"
-        out = self.forward(batch, compute_color_in_rasterizer=True)
-        rgb_img = out["comp_rgb"][0]
+        # batch_size = batch["c2w"].shape[0]
+        # assert batch_size == 1, "Now only support batch size = 1"
+        # out = self.forward(batch, compute_color_in_rasterizer=True)
+        # rgb_img = out["comp_rgb"][0]
         
-        c2w = batch["c2w"][0].cpu().numpy()
-        Rt = np.linalg.inv(c2w)
-        T = Rt[:3, 3]
-        R = Rt[:3, :3].transpose()
-        fov = batch["fovy"].cpu().numpy()[0]
-        height = batch["height"].item()
-        width = batch["width"].item()
-        gs_camera = GSCamera(
-            R=R, T=T, FoVx=fov, FoVy=fov,
-            image_height=height,
-            image_width=width,
-            data_device="cuda"
-        )
-        p3d_camera = convert_camera_from_gs_to_pytorch3d(gs_cameras=[gs_camera])[0]
+        # c2w = batch["c2w"][0].cpu().numpy()
+        # Rt = np.linalg.inv(c2w)
+        # T = Rt[:3, 3]
+        # R = Rt[:3, :3].transpose()
+        # fov = batch["fovy"].cpu().numpy()[0]
+        # height = batch["height"].item()
+        # width = batch["width"].item()
+        # gs_camera = GSCamera(
+        #     R=R, T=T, FoVx=fov, FoVy=fov,
+        #     image_height=height,
+        #     image_width=width,
+        #     data_device="cuda"
+        # )
+        # p3d_camera = convert_camera_from_gs_to_pytorch3d(gs_cameras=[gs_camera])[0]
 
-        fragments = self.mesh_renderer.rasterizer(self.idx_mesh, cameras=p3d_camera)
-        idx_img = self.mesh_renderer.shader(fragments, self.idx_mesh, cameras=p3d_camera)[0, ..., :2]
+        # fragments = self.mesh_renderer.rasterizer(self.idx_mesh, cameras=p3d_camera)
+        # idx_img = self.mesh_renderer.shader(fragments, self.idx_mesh, cameras=p3d_camera)[0, ..., :2]
 
-        update_mask = fragments.zbuf[0, ..., 0] > 0
-        idx_to_update = idx_img[update_mask].round().long()
+        # update_mask = fragments.zbuf[0, ..., 0] > 0
+        # idx_to_update = idx_img[update_mask].round().long()
 
-        use_average = True
-        if not use_average:
-            self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = rgb_img[update_mask]
-        else:
-            no_initialize_mask = self.texture_counter[(idx_to_update[..., 0], idx_to_update[..., 1])][..., 0] != 0
-            self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = no_initialize_mask[..., None] * self.texture_img[
-                (idx_to_update[..., 0], idx_to_update[..., 1])]
+        # use_average = True
+        # if not use_average:
+        #     self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = rgb_img[update_mask]
+        # else:
+        #     no_initialize_mask = self.texture_counter[(idx_to_update[..., 0], idx_to_update[..., 1])][..., 0] != 0
+        #     self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = no_initialize_mask[..., None] * self.texture_img[
+        #         (idx_to_update[..., 0], idx_to_update[..., 1])]
 
-            self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = self.texture_img[(
-                idx_to_update[..., 0], idx_to_update[..., 1])] + rgb_img[update_mask]
-            self.texture_counter[(idx_to_update[..., 0], idx_to_update[..., 1])] = self.texture_counter[(
-                idx_to_update[..., 0], idx_to_update[..., 1])] + 1
+        #     self.texture_img[(idx_to_update[..., 0], idx_to_update[..., 1])] = self.texture_img[(
+        #         idx_to_update[..., 0], idx_to_update[..., 1])] + rgb_img[update_mask]
+        #     self.texture_counter[(idx_to_update[..., 0], idx_to_update[..., 1])] = self.texture_counter[(
+        #         idx_to_update[..., 0], idx_to_update[..., 1])] + 1
+        pass
             
     def on_predict_epoch_end(self) -> None:
         self.texture_img = self.texture_img / self.texture_counter.clamp(min=1)

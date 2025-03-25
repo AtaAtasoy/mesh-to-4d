@@ -21,6 +21,7 @@ from pytorch3d.io import load_objs_as_meshes
 from .sugar import SuGaRModel
 from .deformation import DeformationNetwork, ModelHiddenParams
 from ..utils.dual_quaternions import DualQuaternion
+# from .mesh_utils import compute_deformation_graph_features, compute_deformation_graph_wks
 
 from tqdm import trange
 
@@ -71,6 +72,7 @@ class DynamicSuGaRModel(SuGaRModel):
         dist_mode: str = 'eucdisc'
 
         skinning_method: str = "hybrid"  # "lbs"(linear blending skinning) or "dqs"(dual-quaternion skinning) or "hybrid"
+        use_extra_features: bool = False
 
 
     cfg: Config
@@ -144,6 +146,8 @@ class DynamicSuGaRModel(SuGaRModel):
             deformation_args.no_dr = False
             deformation_args.no_ds = not (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs")
             deformation_args.no_do = not (self.cfg.skinning_method == "hybrid")
+            deformation_args.use_extra_features = self.cfg.use_extra_features
+            self.use_extra_features = self.cfg.use_extra_features
 
             self._deformation = DeformationNetwork(deformation_args)
             self._deformation_table = torch.empty(0)
@@ -326,6 +330,19 @@ class DynamicSuGaRModel(SuGaRModel):
             return deformed_vert_rot.matrix()
         else:
             return deformed_vert_rot
+        
+    def get_timed_deformation(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"] = None
+    ) -> Float[Tensor, "N_t N_v 3"]:
+        # Calculate the difference of the mesh at given timestamp with the rest pose
+        
+        rest_pose = self.get_timed_vertex_xyz(torch.zeros_like(timestamp), torch.zeros_like(frame_idx))
+        deformed_pose = self.get_timed_vertex_xyz(timestamp, frame_idx)
+        
+        return deformed_pose - rest_pose
+        
 
     # ============= Functions to compute normals ============= #
     def get_timed_surface_mesh(
@@ -335,12 +352,13 @@ class DynamicSuGaRModel(SuGaRModel):
     ) -> Meshes:
         n_t = len(timestamp) if timestamp is not None else len(frame_idx)
         deformed_vert_pos = self.get_timed_vertex_xyz(timestamp, frame_idx)
-        if torch.all(self._vertex_colors == 0.5):
-            textures = self.torch3d_mesh.extend(n_t).textures # TexturesUV
-        else:
-            textures = TexturesVertex(
-                verts_features=torch.stack([self._vertex_colors] * n_t, dim=0).clamp(0, 1).to(self.device)
-            )
+        # if torch.all(self._vertex_colors == 0.5):
+        #     textures = self.torch3d_mesh.extend(n_t).textures # TexturesUV
+        # else:
+        #     textures = TexturesVertex(
+        #         verts_features=torch.stack([self._vertex_colors] * n_t, dim=0).clamp(0, 1).to(self.device)
+        #     )
+        textures = self.torch3d_mesh.extend(n_t).textures.to(self.device)
         
         surface_mesh = Meshes(
             # verts=self.get_timed_xyz_vertices(timestamp, frame_idx),
@@ -369,6 +387,14 @@ class DynamicSuGaRModel(SuGaRModel):
             self.cfg.n_gaussians_per_surface_triangle, dim=1
         )
 
+    def get_timed_vertex_normals(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"] = None
+    ) -> Float[Tensor, "N_t N_v 3"]:
+        return self.get_timed_surface_mesh(timestamp, frame_idx).verts_normals_padded()
+        
+    
     # ========= Compute deformation nodes' attributes ======== #
     def get_timed_dg_attributes(
         self,
@@ -426,26 +452,26 @@ class DynamicSuGaRModel(SuGaRModel):
         elif self.dynamic_mode == "deformation":
             assert timestamp is not None
             pts = self._deform_graph_node_xyz
-
+        
             num_pts = pts.shape[0]
             num_t = timestamp.shape[0]
             pts = torch.cat([pts] * num_t, dim=0)
             ts = timestamp.unsqueeze(-1).repeat_interleave(num_pts, dim=0)
-
-
-            # start_time = time.time_ns()
-            trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1)
-            # print(f"real MLP time: {time.time_ns() - start_time} ns")
-
-            # debug
-            # num_time = 500
-            # pts_debug = torch.cat([pts for i in range(num_time)])
-            # ts_debug = timestamp.unsqueeze(-1).repeat_interleave(num_pts*num_time, dim=0)
-            # start_time = time.time_ns()
-            # debug_trans, debug_rot, debug_d_scale, debug_d_opacity = self._deformation.forward_dynamic_delta(pts_debug, ts_debug * 2 - 1)
-            # print(f"debug MLP time: {time.time_ns() - start_time} ns")
-
-
+            
+            if self.use_extra_features:
+                downpcd = o3d.geometry.PointCloud()
+                downpcd.points = o3d.utility.Vector3dVector(pts.cpu().numpy())
+                
+                if downpcd.has_normals():
+                    pcd_normals = torch.from_numpy(np.array(downpcd.normalize_normals().normals, dtype=np.float32)).to(self.device)
+                else:
+                    downpcd.estimate_normals()
+                    pcd_normals = torch.from_numpy(np.array(downpcd.normalize_normals().normals, dtype=np.float32)).to(self.device)
+                    
+                normals = torch.cat([pcd_normals] * num_t, dim=0)
+                trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1, normals, self.node_wks_vector)
+            else:
+                trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1)
 
             # trans, rot = self._deformation.forward_dg_trans_and_rotation(pts, ts * 2 - 1)
             trans = trans.reshape(num_t, num_pts, 3)
@@ -502,7 +528,6 @@ class DynamicSuGaRModel(SuGaRModel):
         # debug time
         # start_time = time.time_ns()
         dg_node_attrs = self.get_timed_dg_attributes(timestamp, frame_idx)
-        # print(f"MLP time: {time.time_ns() - start_time} ns")
         
         dg_node_trans, dg_node_rots = dg_node_attrs["xyz"], dg_node_attrs["rotation"]
 
@@ -523,15 +548,6 @@ class DynamicSuGaRModel(SuGaRModel):
         # deform vertex xyz
         if self.cfg.skinning_method == "lbs" or self.cfg.skinning_method == "hybrid":
             num_pts = self.get_xyz_verts.shape[0]
-            # dists_vec: Float[Tensor, "N_t N_p N_n 3 1"]
-            # dists_vec = (self.get_xyz_verts.unsqueeze(1) - neighbor_nodes_xyz).unsqueeze(-1)
-            # dists_vec = torch.stack([dists_vec] * n_t, dim=0)
-
-            # deformed_vert_xyz: Float[Tensor, "N_t N_p 3"]
-            # deformed_xyz = torch.bmm(
-            #     neighbor_nodes_rots.matrix().reshape(-1, 3, 3), dists_vec.reshape(-1, 3, 1)
-            # ).squeeze(-1).reshape(n_t, num_pts, -1, 3)
-            # deformed_xyz = deformed_xyz + neighbor_nodes_xyz.unsqueeze(0) + neighbor_nodes_trans
 
             deformed_xyz = torch.bmm(
                 neighbor_nodes_scales.reshape(-1, 3, 3),
@@ -542,14 +558,6 @@ class DynamicSuGaRModel(SuGaRModel):
                 neighbor_nodes_rots.matrix().reshape(-1, 3, 3), deformed_xyz
             ).squeeze(-1).reshape(n_t, num_pts, -1, 3)
             deformed_xyz = deformed_xyz + neighbor_nodes_trans
-
-
-            # deformed_xyz = torch.bmm(
-            #     neighbor_nodes_rots.matrix().reshape(-1, 3, 3),
-            #     self.get_xyz_verts.unsqueeze(0).unsqueeze(2).unsqueeze(-1).repeat(
-            #         n_t, 1, neighbor_nodes_xyz.shape[1], 1, 1).reshape(-1, 3, 1)
-            # ).squeeze(-1).reshape(n_t, num_pts, -1, 3)
-            # deformed_xyz = deformed_xyz + neighbor_nodes_trans
 
             nn_weights = self._xyz_neighbor_nodes_weights[None, :, :, None]
             deformed_vert_xyz_lbs = (nn_weights * deformed_xyz).sum(dim=2)
@@ -590,12 +598,6 @@ class DynamicSuGaRModel(SuGaRModel):
             self._xyz_neighbor_nodes_weights[None, ..., None] * neighbor_nodes_rots.Log()
         ).sum(dim=-2)
         deformed_vert_rots = pp.so3(deformed_vert_rots).Exp()
-        # deformed_vert_rots = pp.SO3(deformed_vert_rots / deformed_vert_rots.norm(dim=-1, keepdim=True))
-
-        # debug time
-        # print(f"Skinning Vertex time: {time.time_ns() - start_time} ns")
-
-
 
         outs = {"xyz": deformed_vert_xyz, "rotation": deformed_vert_rots}
         if self.cfg.d_scale:
@@ -800,8 +802,6 @@ class DynamicSuGaRModel(SuGaRModel):
                 for i in range(self._xyz_cpu.shape[0])
             ]
         elif mode == "geodisc":
-            # vertices = self._xyz_cpu
-            # faces = self._surface_mesh_faces.cpu().numpy()
             vertices = np.asarray(mesh.vertices)
             faces = np.asarray(mesh.triangles)
 
@@ -829,14 +829,12 @@ class DynamicSuGaRModel(SuGaRModel):
             downpcd_points = np.asarray(downpcd.points)
             for i in trange(self._xyz_cpu.shape[0], leave=False):
                 source_index = np.array([i])
-                start_time1 = time.time()
                 # geodesic distance calculation
                 # distances = geoalg.geodesicDistances(source_index, target_index)[0]
 
                 # potpourri3d distance calculation
                 distances = geoalg.compute_distance(source_index)[target_index]
 
-                # print(f"i: {i}, geodist calculation: {time.time() - start_time1}")
                 sorted_index = np.argsort(distances)
 
                 k_n_neighbor = sorted_index[:nodes_connectivity]
@@ -849,10 +847,6 @@ class DynamicSuGaRModel(SuGaRModel):
 
                 xyz_neighbor_nodes_weights.append(
                     torch.from_numpy(
-                        # np.exp(
-                        #     - (np.linalg.norm(vertices[i] - downpcd_points[k_n_neighbor], axis=1) + 1e-5) ** 2 / 2
-                        # )
-                        # np.linalg.norm(vertices[i] - downpcd_points[k_n_neighbor], axis=1) ** 2
                         (1 - vert_to_neighbor_dists[:nodes_connectivity] / vert_to_neighbor_dists[-1]) ** 2
                     ).float().to(device)
                 )
@@ -865,11 +859,18 @@ class DynamicSuGaRModel(SuGaRModel):
         print(torch.min(self._xyz_neighbor_node_idx))
 
         self._xyz_neighbor_nodes_weights = torch.stack(xyz_neighbor_nodes_weights).to(device)
-        # self._xyz_neighbor_nodes_weights = torch.sqrt(self._xyz_neighbor_nodes_weights)
         # normalize
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights
                                             / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
                                             )
+        
+        # self.node_wks_vector = compute_deformation_graph_features(mesh, 
+        #                                                      self._xyz_neighbor_node_idx, 
+        #                                                      self._xyz_neighbor_nodes_weights,
+        #                                                      n_nodes
+        #                                                      )
+        # if self.cfg.use_extra_features:
+        #     self.node_wks_vector = compute_deformation_graph_wks(nodes=self._deform_graph_node_xyz.detach().cpu().numpy(), node_neighbor_idx=self._xyz_neighbor_node_idx.detach().cpu().numpy(), node_neighbor_weights=self._xyz_neighbor_nodes_weights.detach().cpu().numpy())
 
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         super().update_step(epoch, global_step, on_load_weights)

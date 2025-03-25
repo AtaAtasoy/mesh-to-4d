@@ -92,7 +92,7 @@ class TemporalStableZero123Guidance(BaseObject):
         grad_clip: Optional[
             Any
         ] = None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
-        half_precision_weights: bool = True
+        half_precision_weights: bool = False
 
         min_step_percent: float = 0.02
         max_step_percent: float = 0.98
@@ -102,7 +102,7 @@ class TemporalStableZero123Guidance(BaseObject):
     cfg: Config
 
     def configure(self) -> None:
-        threestudio.info(f"Loading Stable Zero123 ...")
+        threestudio.info(f"Loading Temporal Stable Zero123 ...")
 
         self.config = OmegaConf.load(self.cfg.pretrained_config)
         # TODO: seems it cannot load into fp16...
@@ -163,7 +163,74 @@ class TemporalStableZero123Guidance(BaseObject):
 
         self.prepare_embeddings_video(self.cfg.cond_video_dir)
 
-        threestudio.info(f"Loaded Stable Zero123!")
+        threestudio.info(f"Loaded Temporal Stable Zero123!")
+        
+    
+    @torch.amp.autocast('cuda', enabled=False)
+    @torch.no_grad()
+    def guidance_eval(self, cond, t_orig, latents, noise_pred):
+        # use only 50 timesteps, and find nearest of those to t
+        self.scheduler.set_timesteps(50)
+        self.scheduler.timesteps_gpu = self.scheduler.timesteps.to(self.device)
+        bs = latents.shape[0]  # batch size
+        large_enough_idxs = self.scheduler.timesteps_gpu.expand(
+            [bs, -1]
+        ) > t_orig.unsqueeze(
+            -1
+        )  # sized [bs,50] > [bs,1]
+        idxs = torch.min(large_enough_idxs, dim=1)[1]
+        t = self.scheduler.timesteps_gpu[idxs]
+
+        fracs = list((t / self.scheduler.config.num_train_timesteps).cpu().numpy())
+        imgs_noisy = self.decode_latents(latents).permute(0, 2, 3, 1)
+
+        # get prev latent
+        latents_1step = []
+        pred_1orig = []
+        for b in range(len(t)):
+            step_output = self.scheduler.step(
+                noise_pred[b : b + 1], t[b], latents[b : b + 1], eta=1
+            )
+            latents_1step.append(step_output["prev_sample"])
+            pred_1orig.append(step_output["pred_original_sample"])
+        latents_1step = torch.cat(latents_1step)
+        pred_1orig = torch.cat(pred_1orig)
+        imgs_1step = self.decode_latents(latents_1step).permute(0, 2, 3, 1)
+        imgs_1orig = self.decode_latents(pred_1orig).permute(0, 2, 3, 1)
+
+        latents_final = []
+        for b, i in enumerate(idxs):
+            latents = latents_1step[b : b + 1]
+            c = {
+                "c_crossattn": [cond["c_crossattn"][0][b * 2 : b * 2 + 2]],
+                "c_concat": [cond["c_concat"][0][b * 2 : b * 2 + 2]],
+            }
+            for t in tqdm(self.scheduler.timesteps[i + 1 :], leave=False):
+                # pred noise
+                x_in = torch.cat([latents] * 2)
+                t_in = torch.cat([t.reshape(1)] * 2).to(self.device)
+                noise_pred = self.model.apply_model(x_in, t_in, c)
+                # perform guidance
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + self.cfg.guidance_scale * (
+                    noise_pred_cond - noise_pred_uncond
+                )
+                # get prev latent
+                latents = self.scheduler.step(noise_pred, t, latents, eta=1)[
+                    "prev_sample"
+                ]
+            latents_final.append(latents)
+
+        latents_final = torch.cat(latents_final)
+        imgs_final = self.decode_latents(latents_final).permute(0, 2, 3, 1)
+
+        return {
+            "noise_levels": fracs,
+            "imgs_noisy": imgs_noisy,
+            "imgs_1step": imgs_1step,
+            "imgs_1orig": imgs_1orig,
+            "imgs_final": imgs_final,
+        }
 
     @torch.amp.autocast('cuda', enabled=False)
     def set_min_max_steps(self, min_step_percent=0.02, max_step_percent=0.98):
@@ -307,7 +374,8 @@ class TemporalStableZero123Guidance(BaseObject):
         **kwargs,
     ):
         batch_size = rgb.shape[0]
-
+        guidance_eval = kwargs.get("guidance_eval", False)
+        
         rgb_BCHW = rgb.permute(0, 3, 1, 2)
         latents: Float[Tensor, "B 4 64 64"]
         if rgb_as_latents:
@@ -370,8 +438,13 @@ class TemporalStableZero123Guidance(BaseObject):
             "min_step": self.min_step,
             "max_step": self.max_step,
         }
+        
+        if guidance_eval:
+            guidance_eval_out = self.guidance_eval(cond, t, latents_noisy, noise_pred)
+        else:
+            guidance_eval_out = {}
+        return guidance_out, guidance_eval_out
 
-        return guidance_out
 
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         # clip grad for stable training as demonstrated in

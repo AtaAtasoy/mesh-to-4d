@@ -38,6 +38,8 @@ from .uncond import (
     RandomCameraArbiraryDataset,
 )
 
+from ..utils.loss_utils import compute_reliability_map, compute_reliability_map_batched
+
 @dataclass
 class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
     video_frames_dir: Optional[str] = None
@@ -45,6 +47,7 @@ class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
     num_frames: int = 14
     norm_timestamp: bool = False
     white_background: bool = False
+    requires_flow: bool = False
 
 class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
     def __init__(self, cfg: Any, split: str) -> None:
@@ -285,6 +288,11 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             self.normals = torch.cat(self.normals, dim=0)
         else:
             self.normals = None
+        
+        if self.cfg.requires_flow:
+            self.flow_reliability = compute_reliability_map(self.rgbs)
+        else:
+            self.flow_reliability = None
 
     def get_all_images(self):
         return self.rgbs
@@ -308,6 +316,7 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             "rgb": self.rgbs[rand_frame_idx],
             "ref_depth": self.depths[rand_frame_idx] if self.depths is not None else None,
             "ref_normal": self.normals[rand_frame_idx] if self.normals is not None else None,
+            "reliability_map": self.flow_reliability[rand_frame_idx] if self.flow_reliability is not None else None,
             "mask": self.masks[rand_frame_idx],
             "height": self.height,
             "width": self.width,
@@ -417,7 +426,6 @@ class TemporalRandomCameraDataset(Dataset):
         )
         c2w[:, 3, 3] = 1.0
         
-        # c2w = convert_pose(c2w)
 
         # get directions by dividing directions_unit_focal by focal length
         focal_length: Float[Tensor, "B"] = (

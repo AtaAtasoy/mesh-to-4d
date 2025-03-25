@@ -41,6 +41,8 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         n_samples_for_sugar_sdf_reg: int = 500000
         min_opac_prune: Any = 0.5
         
+        render_gaussian: bool = True
+        
 
     cfg: Config
 
@@ -72,8 +74,6 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         self.pearson = PearsonCorrCoef().to(self.device)
         self.img_at_iteration = defaultdict(list)
 
-        # Zero123
-        # self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
 
     def on_load_checkpoint(self, checkpoint):
         if self.stage == "gaussian":
@@ -97,7 +97,8 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         if self.stage == "sugar" and not compute_color_in_rasterizer:
             self.geometry: SuGaRModel
             batch.update(
-                {"override_color": self.geometry.get_points_rgb()}
+                {"override_color": self.geometry.get_points_rgb(),
+                 "render_gaussians": self.cfg.render_gaussian}
             )
         outputs = self.renderer.batch_forward(batch)
         return outputs
@@ -181,8 +182,8 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
 
             # depth loss
             if self.C(self.cfg.loss.lambda_depth) > 0:
-                valid_gt_depth = batch["ref_depth"][gt_mask.squeeze(-1)].unsqueeze(1)
-                valid_pred_depth = out["comp_depth"][gt_mask].unsqueeze(1)
+                valid_gt_depth = batch["ref_depth"][gt_mask.squeeze(-1)]
+                valid_pred_depth = out["comp_depth"][gt_mask]
                 with torch.no_grad():
                     A = torch.cat(
                         [valid_gt_depth, torch.ones_like(valid_gt_depth)], dim=-1
@@ -413,17 +414,17 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
                    if self.C(self.cfg.loss.lambda_normal) > 0
                     else []
                 )
-                # + (
-                #     [
-                #         {
-                #             "type": "rgb",
-                #             "img": out["comp_normal_from_dist"][0],
-                #             "kwargs": {"data_format": "HWC", "data_range": (0, 1)},
-                #         }
-                #     ]
-                #     if "comp_normal_from_dist" in out
-                #     else []
-                # )
+                + (
+                    [
+                        {
+                            "type": "rgb",
+                            "img": out["comp_normal_from_dist"][0],
+                            "kwargs": {"data_format": "HWC", "data_range": (0, 1)},
+                        }
+                    ]
+                    if "comp_normal_from_dist" in out
+                    else []
+                )
                 + (
                     [
                         {
@@ -451,10 +452,7 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         )
         out = self(batch)
         save_out_to_image_grid(f"it{self.true_global_step}-val/{batch_idx}.png", out)
-        psnr_val = psnr(img1=batch["rgb"], img2=out["comp_rgb"], mask=batch["mask"])
-        # (_, channel, _, _) = img1.size()
-        ssim = ssim_metric(img1=batch["rgb"].permute(0, 3, 1, 2), img2=out["comp_rgb"].permute(0, 3, 1, 2), mask=batch["mask"].permute(0, 3, 1, 2))
-        # perceptual_sim_val = perceptual_sim(img1=batch["rgb"], img2=out["comp_rgb"])
+        psnr_val = psnr(img1=batch["rgb"], img2=out["comp_rgb"], mask=batch["mask"])        ssim = ssim_metric(img1=batch["rgb"].permute(0, 3, 1, 2), img2=out["comp_rgb"].permute(0, 3, 1, 2), mask=batch["mask"].permute(0, 3, 1, 2))
         threestudio.info(f'PSNR: {psnr_val.item()}, SSIM: {ssim.item()}')
         
     def on_validation_epoch_end(self):
