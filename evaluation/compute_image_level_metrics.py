@@ -97,7 +97,7 @@ if __name__ == "__main__":
                 gt_path = os.path.join(gt_folder, gt_imgs[idx])
 
                 pred_img, pred_img_rgb = load_and_preprocess_image(pred_path)
-                gt_img, gt_img_rgb = load_and_preprocess_image(gt_path)
+                gt_img, gt_img_rgb = load_and_preprocess_image(gt_path, rgba=True)
 
                 # Calculate the embeddings for the images using the CLIP model
                 pred_img = pred_img["pixel_values"]
