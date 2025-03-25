@@ -1,5 +1,4 @@
 import numpy as np
-import threestudio
 from pytorch3d.structures import Meshes, utils
 from pytorch3d.renderer import TexturesUV, TexturesVertex
 import torch
