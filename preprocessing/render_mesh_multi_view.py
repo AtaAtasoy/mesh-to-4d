@@ -22,7 +22,6 @@ from dreifus.camera import CameraCoordinateConvention
 from dreifus.matrix import Pose
 import cv2
 import shutil
-from rembg import remove
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Render multi-view images.")

@@ -3,7 +3,7 @@ import argparse
 from PIL import Image
 import numpy as np
 import torch
-from pytorch3d.io import load_objs_as_meshes, load_ply, IO
+from pytorch3d.io import IO
 from pytorch3d.io.experimental_gltf_io import MeshGlbFormat
 
 from pytorch3d.structures import Meshes
@@ -11,23 +11,14 @@ from pytorch3d.renderer import (
     FoVPerspectiveCameras,
     MeshRenderer,
     MeshRasterizer,
-    SoftPhongShader,
-    PointLights,
     look_at_view_transform,
     RasterizationSettings,
     BlendParams,
-    AmbientLights, 
-    TexturesVertex,
+    AmbientLights,
     HardPhongShader
 )
-from rembg import remove
 
-def main():
-    parser = argparse.ArgumentParser(description="Render a mesh from the front view.")
-    parser.add_argument('--mesh_path', type=str, required=True, help='Path to the mesh file (e.g., .obj).')
-    parser.add_argument('--output_path', type=str, required=True, help='Path to save the rendered image.')
-    parser.add_argument('--remove_bg', action='store_true', help='Remove the background from the rendered image.')
-    args = parser.parse_args()
+def render_front(mesh_path: str, output_path: str, img_width: int=512, img_height: int=512):
 
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,16 +26,14 @@ def main():
     mesh_io.register_meshes_format(MeshGlbFormat())
 
     # Load and normalize the mesh
-    mesh = mesh_io.load_mesh(path=args.mesh_path, include_textures=True, device=device)
+    mesh = mesh_io.load_mesh(path=mesh_path, include_textures=True, device=device)
     print(f"Mesh bounding boxes: {mesh.get_bounding_boxes()}")
     
-    blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
-
     # Rendering settings
     raster_settings = RasterizationSettings(
-        image_size=1024, 
+        image_size=(img_height, img_width), 
         blur_radius=0, 
-        faces_per_pixel=150, 
+        faces_per_pixel=1, 
     )
 
     blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))  
@@ -74,9 +63,9 @@ def main():
     image_pil = Image.fromarray(image)
         
     # Save the image
-    os.makedirs(args.output_path, exist_ok=True)
-    mesh_name = os.path.splitext(os.path.basename(args.mesh_path))[0]
-    output_file = os.path.join(args.output_path, f"{mesh_name}.png")
+    os.makedirs(output_path, exist_ok=True)
+    mesh_name = os.path.splitext(os.path.basename(mesh_path))[0]
+    output_file = os.path.join(output_path, f"{mesh_name}.png")
     image_pil.save(output_file)
     
     # Create mask from alpha channel
@@ -84,11 +73,18 @@ def main():
     mask_pil = Image.fromarray(alpha_channel)
     
     # Save the mask
-    mask_file = os.path.join(args.output_path, f"{mesh_name}_mask.png")
+    mask_file = os.path.join(output_path, f"{mesh_name}_mask.png")
     mask_pil.save(mask_file)
     print(f"Mask saved to {mask_file}")
     
     print(f"Rendered image saved to {output_file}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Render a mesh from the front view.")
+    parser.add_argument('--mesh_path', type=str, required=True, help='Path to the mesh file (e.g., .obj).')
+    parser.add_argument('--output_path', type=str, required=True, help='Path to save the rendered image.')
+    parser.add_argument('--img_width', type=int, default=512, help='Width of the rendered image.')
+    parser.add_argument('--img_height', type=int, default=512, help='Height of the rendered image.')
+    args = parser.parse_args()
+    
+    render_front(args.mesh_path, args.output_path, args.img_width, args.img_height)

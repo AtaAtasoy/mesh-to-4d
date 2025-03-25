@@ -203,3 +203,5 @@ threestudio/
 
 launch.py
 setup.py
+
+*.sh
