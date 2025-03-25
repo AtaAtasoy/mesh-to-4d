@@ -92,7 +92,7 @@ class TemporalStableZero123Guidance(BaseObject):
         grad_clip: Optional[
             Any
         ] = None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
-        half_precision_weights: bool = False
+        half_precision_weights: bool = True
 
         min_step_percent: float = 0.02
         max_step_percent: float = 0.98

@@ -452,7 +452,8 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         )
         out = self(batch)
         save_out_to_image_grid(f"it{self.true_global_step}-val/{batch_idx}.png", out)
-        psnr_val = psnr(img1=batch["rgb"], img2=out["comp_rgb"], mask=batch["mask"])        ssim = ssim_metric(img1=batch["rgb"].permute(0, 3, 1, 2), img2=out["comp_rgb"].permute(0, 3, 1, 2), mask=batch["mask"].permute(0, 3, 1, 2))
+        psnr_val = psnr(img1=batch["rgb"], img2=out["comp_rgb"], mask=batch["mask"])        
+        ssim = ssim_metric(img1=batch["rgb"].permute(0, 3, 1, 2), img2=out["comp_rgb"].permute(0, 3, 1, 2), mask=batch["mask"].permute(0, 3, 1, 2))
         threestudio.info(f'PSNR: {psnr_val.item()}, SSIM: {ssim.item()}')
         
     def on_validation_epoch_end(self):
