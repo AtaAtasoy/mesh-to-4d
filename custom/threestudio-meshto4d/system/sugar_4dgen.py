@@ -189,8 +189,6 @@ class SuGaR4DGen(BaseSuGaRSystem):
             batch["frame_indices"] = frame_indices
 
             ambient_ratio = 1.0
-            shading = "diffuse"
-            batch["shading"] = shading
                     
         batch["ambient_ratio"] = ambient_ratio
         out = self(batch)
@@ -213,7 +211,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
             gt_mask = batch["mask"]
             gt_rgb = batch["rgb"]         
             # color loss
-            #gt_rgb = gt_rgb * gt_mask.float()
+            gt_rgb = gt_rgb * gt_mask.float()
             if self.C(self.cfg.loss.lambda_rgb) > 0:
                 if not self.C(self.cfg.loss.lambda_flow) > 0:
                     set_loss("rgb", F.mse_loss(gt_rgb, out["comp_rgb"]))
@@ -236,24 +234,8 @@ class SuGaR4DGen(BaseSuGaRSystem):
             if self.C(self.cfg.loss.lambda_mesh_mask) > 0:
                 set_loss("mesh_mask", F.mse_loss(gt_mask.float(), out["mesh_comp_mask"]))
             
-            # set_loss("mesh_mask", F.mse_loss(gt_mask.float(), out["mesh_comp_mask"]))
             if self.C(self.cfg.loss.lambda_mesh_rgb) > 0:   
                 set_loss("mesh_rgb", F.mse_loss(gt_rgb, out["mesh_comp_rgb"]))
-
-            # if self.cfg.render_gaussians:
-            #     ref_psnr = self.psnr(out["comp_rgb"], gt_rgb)
-            # else:
-            #     ref_psnr = self.psnr(out["mesh_comp_rgb"], gt_rgb)
-            if self.C(self.cfg.loss.lambda_mesh_rgb) > 0:   
-                ref_mesh_psnr = self.psnr(out["mesh_comp_rgb"], gt_rgb)
-            # ref_ssim = self.ssim(out["comp_rgb"], gt_rgb)
-            # ref_lpips = self.lpips(out["comp_rgb"], gt_rgb)
-
-            # self.log(f"metric/PSNR", ref_psnr)
-            if self.C(self.cfg.loss.lambda_mesh_rgb) > 0:   
-                self.log(f"metric/Mesh_PSNR", ref_mesh_psnr)
-            # self.log(f"metric/SSIM", ref_ssim)
-            # self.log(f"metric/LPIPS", ref_lpips)
 
             # depth loss
             if self.C(self.cfg.loss.lambda_depth) > 0:
@@ -334,96 +316,30 @@ class SuGaR4DGen(BaseSuGaRSystem):
             
             if self.true_global_step % 200 == 0:
                 if self.C(self.cfg.loss.lambda_sds_zero123) > 0:
-                    zero123_img = out["comp_rgb"]    
-                    img1, img2, img3, img4 = zero123_img[0], zero123_img[1], zero123_img[2], zero123_img[3]
-                                            
-                    self.save_image_grid(
-                        f"rand_camera_gaussian_{self.true_global_step}.png",
-                        imgs=[
-                            {
-                                "type": "rgb",
-                                "img": img1,
-                                "kwargs": {"data_format": "HWC"},
-                            },
-                            {
-                                "type": "rgb",
-                                "img": img2,
-                                "kwargs": {"data_format": "HWC"},
-                                
-                            },
-                            {
-                                "type": "rgb",
-                                "img": img3,
-                                "kwargs": {"data_format": "HWC"},
-                            },
-                            {
-                                "type": "rgb",
-                                "img": img4,
-                                "kwargs": {"data_format": "HWC"},
-                            },              
-                        ],
-                    )
+                    zero123_cond_imgs = out["comp_rgb"]
+                    imgs_data = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
+                        for img in zero123_cond_imgs
+                    ]                    
+                    self.save_image_grid(f"rand_camera_gaussian_{self.true_global_step}.png", imgs=imgs_data)
                 
                 if self.cfg.loss.lambda_mesh_rgb > 0:
                     threestudio.info(f"Saving mesh images at {self.true_global_step}")
                     mesh_rgbs = out["mesh_comp_rgb"]
-                    mesh1, mesh2, mesh3, mesh4 = mesh_rgbs[0], mesh_rgbs[1], mesh_rgbs[2], mesh_rgbs[3]
-                    self.save_image_grid(
-                        f"rand_camera_mesh_{self.true_global_step}.png",
-                        imgs=[
-                            {
-                                "type": "rgb",
-                                "img": mesh1,
-                                "kwargs": {"data_format": "HWC"},
-                                
-                            },
-                            {
-                                "type": "rgb",
-                                "img": mesh2,
-                                "kwargs": {"data_format": "HWC"},
-                                
-                            },
-                            {
-                                "type": "rgb",
-                                "img": mesh3,
-                                "kwargs": {"data_format": "HWC"},
-                            },
-                            {
-                                "type": "rgb",
-                                "img": mesh4,
-                                "kwargs": {"data_format": "HWC"},
-                            },              
-                        ],
-                    )
+                    imgs_data = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
+                        for img in mesh_rgbs
+                    ]
+                    self.save_image_grid(f"rand_camera_mesh_{self.true_global_step}.png", imgs=imgs_data)
                 if self.cfg.loss.lambda_mesh_mask > 0:
                     threestudio.info(f"Saving mesh masks at {self.true_global_step}")
                     mesh_masks = out["mesh_comp_mask"]
-                    m_mask1, m_mask2, m_mask3, m_mask4 = mesh_masks[0], mesh_masks[1], mesh_masks[2], mesh_masks[3]
-                    self.save_image_grid(
-                        f"rand_camera_mesh_mask_{self.true_global_step}.png",
-                        imgs=[
-                            {
-                                "type": "grayscale",
-                                "img": m_mask1[..., 0],
-                                "kwargs": {"cmap": None, "data_range": (0, 1)},
-                            },
-                            {
-                                 "type": "grayscale",
-                                "img": m_mask2[..., 0],
-                                "kwargs": {"cmap": None, "data_range": (0, 1)},
-                            },
-                            {
-                                 "type": "grayscale",
-                                "img": m_mask3[..., 0],
-                                "kwargs": {"cmap": None, "data_range": (0, 1)},
-                            },
-                            {
-                                 "type": "grayscale",
-                                "img": m_mask4[..., 0],
-                                "kwargs": {"cmap": None, "data_range": (0, 1)},
-                            },
-                        ]
-                    )
+                    imgs_data = [
+                        {"type": "grayscale", "img": mask[..., 0],
+                        "kwargs": {"cmap": None, "data_range": (0, 1)}}
+                        for mask in mesh_masks
+                    ]
+                    self.save_image_grid(f"rand_camera_mesh_mask_{self.true_global_step}.png", imgs=imgs_data)
 
         elif guidance == "video_diffusion":
             guidance_inp = out["comp_rgb"]
@@ -439,104 +355,9 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 self.save_guidance_eval_images(guidance_eval_out, "video_diffusion", self.true_global_step)
 
             loss = guidance_out['loss_sds_video']
-            # reconstructed_video = guidance_eval_out["imgs_final"]
-            # save_image(reconstructed_video[0].permute(1, 0, 2, 3), f"reconstructed_vid_{self.global_step}.png")
             set_loss("sds_video", loss)
         
-        # Regularization
-        if (
-            out.__contains__("comp_normal")
-            and self.C(self.cfg.loss.lambda_normal_smooth) > 0
-        ):
-            normal = out["comp_normal"]
-            set_loss(
-                "normal_smooth",
-                (normal[:, 1:, :, :] - normal[:, :-1, :, :]).square().mean()
-                + (normal[:, :, 1:, :] - normal[:, :, :-1, :]).square().mean(),
-            )
-
-        if self.C(self.cfg.loss.lambda_temporal_smoothness) > 0:
-            number_of_frames = self.geometry.num_frames
-            timestamps = torch.as_tensor(
-                np.linspace(0, 1, number_of_frames+2, endpoint=True), dtype=torch.float32, device=self.device
-            )[1:-1]
-            frame_indices = torch.arange(number_of_frames, dtype=torch.long, device=self.device)
-            
-            all_vertices = self.geometry.get_timed_vertex_xyz(timestamps, frame_indices)    
-            
-            temporal_smoothness_loss_val = temporal_smoothness_loss(all_vertices)      
-            set_loss("temporal_smoothness", temporal_smoothness_loss_val)
-
-        if self.cfg.loss["lambda_rgb_tv"] > 0.0:
-            loss_rgb_tv = tv_loss(out["comp_rgb"].permute(0, 3, 1, 2))
-            set_loss("rgb_tv", loss_rgb_tv)
-
-        if (
-            out.__contains__("comp_depth")
-            and self.cfg.loss["lambda_depth_tv"] > 0.0
-        ):
-            loss_depth_tv = tv_loss(out["comp_depth"].permute(0, 3, 1, 2))
-            set_loss("depth_tv", loss_depth_tv)
-
-        if (
-            out.__contains__("comp_normal")
-            and self.cfg.loss["lambda_normal_tv"] > 0.0
-        ):
-            loss_normal_tv = tv_loss(out["comp_normal"].permute(0, 3, 1, 2))
-            set_loss("normal_tv", loss_normal_tv)
-
-        if (
-            out.__contains__("comp_normal_from_dist")
-            and out.__contains__("comp_normal")
-            and self.C(self.cfg.loss.lambda_normal_depth_consistency) > 0
-        ):
-            # if "comp_normal_from_dist" not in out:
-            #     raise ValueError(
-            #         "comp_normal_from_dist is required for normal-depth consistency loss!"
-            #     )
-            raw_normal = out["comp_normal"] * 2 - 1
-            raw_normal_from_dist = out["comp_normal_from_dist"] * 2 - 1
-            # loss_normal_depth_consistency = F.mse_loss(raw_normal, raw_normal_from_dist)
-            loss_normal_depth_consistency = (1 - raw_normal.unsqueeze(-2) @ raw_normal_from_dist.unsqueeze(-1)).mean()
-            set_loss("normal_depth_consistency", loss_normal_depth_consistency)
-
-        if self.stage != "static" and guidance == "ref" and self.C(self.cfg.loss.lambda_ref_xyz) > 0:
-            '''
-            This appears to be implementing a form of position-based regularization, 
-            where the model tries to keep vertex positions close to their initial reference state. 
-            The loss term is likely weighted by lambda_ref_xyz in the final combined loss function.
-            '''
-            xyz_f0 = self.geometry.get_timed_vertex_xyz(torch.as_tensor(0, dtype=torch.float32, device=self.device))
-            loss_ref_xyz = torch.abs(xyz_f0 - self.geometry.get_xyz_verts).mean()
-            set_loss("ref_xyz", loss_ref_xyz)
-
-        # object centric reg
-        if self.C(self.cfg.loss.lambda_obj_centric) > 0:
-            '''
-            This loss term effectively penalizes the model when vertices drift too far from the origin in the x-y plane, 
-            as it measures how far the average position deviates from zero. 
-            The z-coordinate is notably excluded from this calculation, suggesting this is meant to keep objects centered only in the x-y plane.
-            Finally, the computed loss is registered using set_loss("obj_centric", loss_obj_centric), 
-            which adds it to a dictionary of loss terms with an appropriate prefix.
-            '''
-            vert_timed_xyz = torch.stack(
-                [value for value in self.geometry._deformed_vert_positions.values()],
-                dim=0
-            )
-            loss_obj_centric = (
-                torch.abs(vert_timed_xyz[..., 0].mean())
-                + torch.abs(vert_timed_xyz[..., 1].mean())
-            )
-            set_loss("obj_centric", loss_obj_centric)
-
-        if self.stage == "motion":
-            # ARAP regularization
-            if guidance == "ref" and self.C(
-                self.cfg.loss.lambda_arap_reg_key_frame) > 0 and self.arap_coach is not None:
-                set_loss(
-                    "arap_reg_key_frame",
-                    self._compute_arap_energy(batch.get("timestamp"), batch.get("frame_indices"))
-                )
+        self._apply_regularization_losses(out, guidance, batch=batch, loss_terms=loss_terms)
 
         loss = 0.0
         for name, value in loss_terms.items():
@@ -602,15 +423,98 @@ class SuGaR4DGen(BaseSuGaRSystem):
         vert_timed_rot = self.geometry.get_timed_vertex_rotation(
             tgt_timestamp, tgt_frame_idx, return_matrix=True)
 
-        # dg_node_attrs = self.geometry.get_timed_dg_attributes(tgt_timestamp, tgt_frame_idx)
-        # vert_timed_xyz, vert_timed_rot = dg_node_attrs["xyz"], dg_node_attrs["rotation"].matrix()
-
         loss_arap = 0.
         for i in range(vert_timed_xyz.shape[0]):
             loss_arap += self.arap_coach.compute_arap_energy(
                 xyz_prime=vert_timed_xyz[i], vert_rotations=vert_timed_rot[i]
             )
         return loss_arap
+
+    def _apply_regularization_losses(self, out: Dict[str, Any], batch: Dict[str, Any], guidance: str, loss_terms: Dict[str, Any]):
+        def set_loss(name, value):
+            loss_terms[f"loss_{guidance}_{name}"] = value
+
+        # Normal smoothness regularization
+        if (
+            out.__contains__("comp_normal")
+            and self.C(self.cfg.loss.lambda_normal_smooth) > 0
+        ):
+            normal = out["comp_normal"]
+            set_loss(
+                "normal_smooth",
+                (normal[:, 1:, :, :] - normal[:, :-1, :, :]).square().mean()
+                + (normal[:, :, 1:, :] - normal[:, :, :-1, :]).square().mean(),
+            )
+
+        # Temporal smoothness regularization
+        if self.C(self.cfg.loss.lambda_temporal_smoothness) > 0:
+            number_of_frames = self.geometry.num_frames
+            timestamps = torch.as_tensor(
+                np.linspace(0, 1, number_of_frames+2, endpoint=True), dtype=torch.float32, device=self.device
+            )[1:-1]
+            frame_indices = torch.arange(number_of_frames, dtype=torch.long, device=self.device)
+            
+            all_vertices = self.geometry.get_timed_vertex_xyz(timestamps, frame_indices)    
+            
+            temporal_smoothness_loss_val = temporal_smoothness_loss(all_vertices)      
+            set_loss("temporal_smoothness", temporal_smoothness_loss_val)
+
+        # Total variation regularization for RGB
+        if self.cfg.loss["lambda_rgb_tv"] > 0.0:
+            loss_rgb_tv = tv_loss(out["comp_rgb"].permute(0, 3, 1, 2))
+            set_loss("rgb_tv", loss_rgb_tv)
+
+        # Total variation regularization for depth
+        if (
+            out.__contains__("comp_depth")
+            and self.cfg.loss["lambda_depth_tv"] > 0.0
+        ):
+            loss_depth_tv = tv_loss(out["comp_depth"].permute(0, 3, 1, 2))
+            set_loss("depth_tv", loss_depth_tv)
+
+        # Total variation regularization for normals
+        if (
+            out.__contains__("comp_normal")
+            and self.cfg.loss["lambda_normal_tv"] > 0.0
+        ):
+            loss_normal_tv = tv_loss(out["comp_normal"].permute(0, 3, 1, 2))
+            set_loss("normal_tv", loss_normal_tv)
+
+        # Normal-depth consistency regularization
+        if (
+            out.__contains__("comp_normal_from_dist")
+            and out.__contains__("comp_normal")
+            and self.C(self.cfg.loss.lambda_normal_depth_consistency) > 0
+        ):
+            raw_normal = out["comp_normal"] * 2 - 1
+            raw_normal_from_dist = out["comp_normal_from_dist"] * 2 - 1
+            loss_normal_depth_consistency = (1 - raw_normal.unsqueeze(-2) @ raw_normal_from_dist.unsqueeze(-1)).mean()
+            set_loss("normal_depth_consistency", loss_normal_depth_consistency)
+
+        # Reference XYZ regularization
+        if self.stage != "static" and guidance == "ref" and self.C(self.cfg.loss.lambda_ref_xyz) > 0:
+            xyz_f0 = self.geometry.get_timed_vertex_xyz(torch.as_tensor(0, dtype=torch.float32, device=self.device))
+            loss_ref_xyz = torch.abs(xyz_f0 - self.geometry.get_xyz_verts).mean()
+            set_loss("ref_xyz", loss_ref_xyz)
+
+        # Object centric regularization
+        if self.C(self.cfg.loss.lambda_obj_centric) > 0:
+            vert_timed_xyz = torch.stack(
+                [value for value in self.geometry._deformed_vert_positions.values()],
+                dim=0
+            )
+            loss_obj_centric = (
+                torch.abs(vert_timed_xyz[..., 0].mean())
+                + torch.abs(vert_timed_xyz[..., 1].mean())
+            )
+            set_loss("obj_centric", loss_obj_centric)
+            
+        if guidance == "ref" and self.C(
+            self.cfg.loss.lambda_arap_reg_key_frame) > 0 and self.arap_coach is not None:
+            set_loss(
+                "arap_reg_key_frame",
+                self._compute_arap_energy(batch.get("timestamp"), batch.get("frame_indices"))
+            )
 
     def on_train_batch_start(self, batch, batch_idx, unused=0):
         super().on_train_batch_start(batch, batch_idx, unused)
@@ -621,13 +525,12 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 self.geometry.get_faces.cpu().numpy(),
                 self.device
             )
-
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
 
         total_loss = 0.0
         
-        batch_orig = deepcopy(batch)
+        # batch_orig = deepcopy(batch)
         
         self.log(
             "gauss_num",
@@ -638,16 +541,17 @@ class SuGaR4DGen(BaseSuGaRSystem):
             logger=True,
         )
 
-        out_video_diffusion = self.training_substep(
-            batch, batch_idx, guidance="video_diffusion")
-        total_loss += out_video_diffusion["loss"]
+        if self.enable_vid:
+            out_video_diffusion = self.training_substep(
+                batch, batch_idx, guidance="video_diffusion")
+            total_loss += out_video_diffusion["loss"]
         
         out_zero123 = self.training_substep(
-            batch_orig, batch_idx, guidance="zero123")
+            batch, batch_idx, guidance="zero123")
         total_loss += out_zero123["loss"]
         
         out_ref = self.training_substep(
-            batch_orig, batch_idx, guidance="ref")
+            batch, batch_idx, guidance="ref")
         total_loss += out_ref["loss"]
         
         if self.cfg.freq.inter_frame_reg > 0 and self.global_step % self.cfg.freq.inter_frame_reg == 0:
@@ -764,6 +668,14 @@ class SuGaR4DGen(BaseSuGaRSystem):
             fps=10,
             step=self.true_global_step
         )
+           
+        ref_psnr = self.psnr(out["comp_rgb"], batch["rgb"])
+        ref_ssim = self.ssim(out["comp_rgb"], batch["rgb"])
+        ref_lpips = self.lpips(out["comp_rgb"], batch["rgb"])
+
+        self.log(f"metric/PSNR", ref_psnr)
+        self.log(f"metric/SSIM", ref_ssim)
+        self.log(f"metric/LPIPS", ref_lpips)
 
     def on_validation_epoch_end(self):
         pass
@@ -848,11 +760,6 @@ class SuGaR4DGen(BaseSuGaRSystem):
             step=self.true_global_step
         )
 
-
-    def on_test_epoch_end(self):
-        pass
-
-
     def on_predict_epoch_end(self) -> None:
         self.texture_img = self.texture_img / self.texture_counter.clamp(min=1)
         
@@ -860,13 +767,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
         timestamps = torch.as_tensor(
             np.linspace(0, 1, video_length+2, endpoint=True), dtype=torch.float32
         )[1:-1].to(self.device)
-        
-        # textures_uv = TexturesUV(
-        #     maps=self.texture_img[None],
-        #     verts_uvs=self.verts_uv[None],
-        #     faces_uvs=self.faces_uv[None],
-        #     sampling_mode='nearest',
-        # )
+
         textures_uv = self.geometry.torch3d_mesh.textures
 
         mesh_save_dir = os.path.join(self.get_save_dir(), f"extracted_textured_meshes")
