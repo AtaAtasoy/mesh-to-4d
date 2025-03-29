@@ -39,6 +39,7 @@ from .uncond import (
 )
 
 from ..utils.loss_utils import compute_reliability_map, compute_reliability_map_batched
+from copy import deepcopy
 
 @dataclass
 class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
@@ -48,6 +49,9 @@ class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
     norm_timestamp: bool = False
     white_background: bool = False
     requires_flow: bool = False
+    use_clip_camera: bool = False
+    clip_random_camera: dict = field(default_factory=dict)
+
 
 class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
     def __init__(self, cfg: Any, split: str) -> None:
@@ -63,8 +67,10 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             self.cfg.random_camera.update(
                 {"batch_size": self.num_frames * self.rand_cam_bs}
             )
+        if self.cfg.use_clip_camera:
+            self.clip_rand_cam_bs = self.cfg.clip_random_camera.batch_size
         self.setup(self.cfg, split)
-        # self.single_image_dataset = SingleImageIterableDataset(self.cfg, split)
+        # self.single_image_dataset = SingleImageIterableDataset(self.cfg, split)        
 
     def setup(self, cfg, split):
         self.split = split
@@ -82,6 +88,19 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
                 )
             else:
                 self.random_pose_generator = RandomCameraDataset(
+                    random_camera_cfg, split
+                )
+
+        if self.cfg.use_clip_camera:
+            random_camera_cfg = parse_structured(
+                RandomCameraDataModuleConfig, self.cfg.get("clip_random_camera", {})
+            )
+            if split == "train":
+                self.clip_random_pose_generator = RandomCameraIterableDataset(
+                    random_camera_cfg
+                )
+            else:
+                self.clip_random_pose_generator = RandomCameraDataset(
                     random_camera_cfg, split
                 )
 
@@ -330,6 +349,21 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             batch_rand_cam["timestamp"] = timestamps.repeat_interleave(self.rand_cam_bs)
             batch_rand_cam["frame_indices"] = frame_indices.repeat_interleave(self.rand_cam_bs)
             batch["random_camera"] = batch_rand_cam
+
+        if self.cfg.use_clip_camera:
+            rand_frame_idx = np.random.choice(self.video_length, (self.clip_rand_cam_bs,), replace=True, )
+            timestamps = self.timestamps[rand_frame_idx]
+            frame_indices = self.frame_indices[rand_frame_idx]
+
+            batch_rand_cam = self.clip_random_pose_generator.collate(None)
+            batch_rand_cam["timestamp"] = timestamps
+            batch_rand_cam["frame_indices"] = frame_indices
+            batch["clip_random_camera"] = batch_rand_cam
+            
+            batch_base_rand_cam = deepcopy(batch_rand_cam)
+            batch_base_rand_cam["timestamp"] = self.timestamps[0].repeat_interleave(self.clip_rand_cam_bs)
+            batch_base_rand_cam["frame_indices"] = self.frame_indices[0].repeat_interleave(self.clip_rand_cam_bs)
+            batch["clip_base_random_camera"] = batch_base_rand_cam
 
         return batch
 
