@@ -15,9 +15,8 @@ from threestudio.utils.typing import *
 from threestudio.utils.misc import C
 from torchmetrics import PearsonCorrCoef
 
-from pytorch3d.renderer import TexturesUV
 from pytorch3d.structures import Meshes
-from pytorch3d.io import save_obj, load_objs_as_meshes
+from pytorch3d.io import save_obj
 from pytorch3d.loss import mesh_normal_consistency, mesh_laplacian_smoothing
 
 from ..utils.arap_utils import ARAPCoach
@@ -28,7 +27,9 @@ from PIL import Image
 from ..utils.loss_utils import weighted_mse_loss, temporal_smoothness_loss, cosine_avg
 import clip
 from ..utils.clip_spatial import CLIPVisualEncoder
-from copy import deepcopy
+import time
+import sys
+from ..utils.resize_right import resize, cubic
 
 
 @threestudio.register("sugar-4dgen-system")
@@ -62,7 +63,14 @@ class SuGaR4DGen(BaseSuGaRSystem):
         dynamic_stage: bool = True
         render_mesh: bool = False
         render_gaussians: bool = True
-        use_clip: bool = False
+        
+        # CLIP
+        text_prompt: str = "standing up"
+        base_text_prompt: str = "walking"
+        clip_model: str = "ViT-B/32"
+        consistency_clip_model: str = "ViT-B/32"
+        consistency_vit_stride: int = 8
+        consistency_vit_layer: int = 11
 
     cfg: Config
 
@@ -93,8 +101,6 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 )
         if self.cfg.render_gaussians:
             batch["render_gaussians"] = True
-        if self.cfg.use_clip:
-            batch["base_mesh"] = self.geometry.torch3d_mesh
         if self.cfg.loss.lambda_mesh_rgb > 0:
             batch["render_mesh_rgb"] = True
         if self.cfg.loss.lambda_mesh_mask > 0:
@@ -149,6 +155,31 @@ class SuGaR4DGen(BaseSuGaRSystem):
 
         # debug
         self.geometry.save_path = self.get_save_dir()
+        
+        self.timestamps = torch.as_tensor(
+            np.linspace(0, 1,  self.geometry.num_frames+2, endpoint=True), dtype=torch.float32, device=self.device
+        )[1:-1]
+        self.frame_indices = torch.arange(self.geometry.num_frames, dtype=torch.long, device=self.device)
+        
+        # CLIP
+        if self.cfg.loss.lambda_clip > 0:
+            self.clip_model, _ = clip.load(self.cfg.clip_model, device=self.device)
+            self.fe = CLIPVisualEncoder(self.cfg.consistency_clip_model, self.cfg.consistency_vit_stride, self.device)
+
+            self.clip_mean = torch.tensor([0.48154660, 0.45782750, 0.40821073], device=self.device)
+            self.clip_std  = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=self.device)
+            
+            threestudio.info(f'Base text prompt is {self.cfg.base_text_prompt}')
+            threestudio.info(f'Target text prompt is {self.cfg.text_prompt}')
+            with torch.no_grad():
+                self.text_embeds = clip.tokenize(self.cfg.text_prompt).to(self.device)
+                self.base_text_embeds = clip.tokenize(self.cfg.base_text_prompt).to(self.device)
+                self.text_embeds = self.clip_model.encode_text(self.text_embeds).detach()
+                self.target_text_embeds = self.text_embeds.clone() / self.text_embeds.norm(dim=1, keepdim=True)
+
+                self.delta_text_embeds = self.text_embeds - self.clip_model.encode_text(self.base_text_embeds)
+                self.delta_text_embeds = self.delta_text_embeds / self.delta_text_embeds.norm(dim=1, keepdim=True)
+                
 
     def training_substep(self, batch, batch_idx, guidance: str):
         """
@@ -171,25 +202,24 @@ class SuGaR4DGen(BaseSuGaRSystem):
             batch = batch["random_camera"]
             batch_size = batch["c2w"].shape[0] # batch_size = 4
             random_indx = random.randint(0, batch_size - 1)
-            number_of_frames = self.geometry.num_frames
             random_camera = {}
             for k, v in batch.items():
                 if k != "height" and k != "width":
-                    repeat_factors = [number_of_frames] + [1] * (v.dim() - 1)
+                    repeat_factors = [self.geometry.num_frames] + [1] * (v.dim() - 1)
                     random_camera.update({k: v[random_indx:random_indx + 1].repeat(*repeat_factors)})
                 else:
                     random_camera.update({k: v})
             
             batch = random_camera
-            timestamps = torch.as_tensor(
-                np.linspace(0, 1, number_of_frames+2, endpoint=True), dtype=torch.float32, device=self.device
-            )[1:-1]
-            frame_indices = torch.arange(number_of_frames, dtype=torch.long, device=self.device)
-            batch["timestamp"] = timestamps
-            batch["frame_indices"] = frame_indices
+            batch["timestamp"] = self.timestamps
+            batch["frame_indices"] = self.frame_indices
 
             ambient_ratio = 1.0
-                    
+        elif guidance == "clip":
+            batch_clip_base = batch["clip_base_random_camera"]
+            batch = batch["clip_random_camera"]
+            ambient_ratio = 1.0
+                                                        
         batch["ambient_ratio"] = ambient_ratio
         out = self(batch)
 
@@ -340,7 +370,6 @@ class SuGaR4DGen(BaseSuGaRSystem):
                         for mask in mesh_masks
                     ]
                     self.save_image_grid(f"rand_camera_mesh_mask_{self.true_global_step}.png", imgs=imgs_data)
-
         elif guidance == "video_diffusion":
             guidance_inp = out["comp_rgb"]
             
@@ -356,8 +385,49 @@ class SuGaR4DGen(BaseSuGaRSystem):
 
             loss = guidance_out['loss_sds_video']
             set_loss("sds_video", loss)
-        
-        self._apply_regularization_losses(out, guidance, batch=batch, loss_terms=loss_terms)
+     
+        elif guidance == "clip":
+            clip_renders  = out["comp_rgb"].permute(0, 3, 1, 2) # BxHxWxC
+            clip_renders = resize(clip_renders, out_shape=(224, 224), interp_method=cubic)
+
+            # base_renders = self(batch_clip_base)["comp_rgb"].permute(0, 3, 1, 2)
+            
+            # base_renders = resize(base_renders, out_shape=(224, 224), interp_method=cubic)
+            if self.true_global_step % 200 == 0:
+                clip_imgs_data = [
+                            {"type": "rgb", "img": img, "kwargs": {"data_format": "CHW"}}
+                            for img in clip_renders
+                        ]
+                # base_renders_data = [
+                #             {"type": "rgb", "img": img, "kwargs": {"data_format": "CHW"}}
+                #             for img in base_renders
+                # ]       
+                self.save_image_grid(f"clip_renders{self.true_global_step}.png", imgs=clip_imgs_data)
+                # self.save_image_grid(f"base_renders{self.true_global_step}.png", imgs=base_renders_data)
+
+            # CLIP similarity bas
+            normalized_clip_render = (clip_renders - self.clip_mean[None, :, None, None]) / self.clip_std[None, :, None, None]
+            image_embeds = self.clip_model.encode_image(normalized_clip_render)
+            # with torch.no_grad():
+            #     normalized_base_render = (base_renders - self.clip_mean[None, :, None, None]) / self.clip_std[None, :, None, None]
+            #     base_embeds = self.clip_model.encode_image(normalized_base_render)
+            
+            orig_image_embeds = image_embeds.clone() / image_embeds.norm(dim=1, keepdim=True)
+            # delta_image_embeds = image_embeds - base_embeds + 1e-6 # to avoid division by zero
+            # delta_image_embeds = delta_image_embeds / delta_image_embeds.norm(dim=1, keepdim=True)
+
+            clip_loss = cosine_avg(orig_image_embeds, self.target_text_embeds)
+            # delta_clip_loss = cosine_avg(delta_image_embeds, self.delta_text_embeds)
+            set_loss("clip", clip_loss)
+            # set_loss("delta_clip", delta_clip_loss)
+
+        # self._apply_regularization_losses(out, guidance, loss_terms)
+
+        if guidance == "ref" and self.C(self.cfg.loss.lambda_arap_reg_key_frame) > 0 and self.arap_coach is not None:
+            set_loss(
+                "arap_reg_key_frame",
+                self._compute_arap_energy(batch.get("timestamp"), batch.get("frame_indices"))
+            )
 
         loss = 0.0
         for name, value in loss_terms.items():
@@ -430,7 +500,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
             )
         return loss_arap
 
-    def _apply_regularization_losses(self, out: Dict[str, Any], batch: Dict[str, Any], guidance: str, loss_terms: Dict[str, Any]):
+    def _apply_regularization_losses(self, out: Dict[str, Any], guidance: str, loss_terms: Dict[str, Any]):
         def set_loss(name, value):
             loss_terms[f"loss_{guidance}_{name}"] = value
 
@@ -508,13 +578,6 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 + torch.abs(vert_timed_xyz[..., 1].mean())
             )
             set_loss("obj_centric", loss_obj_centric)
-            
-        if guidance == "ref" and self.C(
-            self.cfg.loss.lambda_arap_reg_key_frame) > 0 and self.arap_coach is not None:
-            set_loss(
-                "arap_reg_key_frame",
-                self._compute_arap_energy(batch.get("timestamp"), batch.get("frame_indices"))
-            )
 
     def on_train_batch_start(self, batch, batch_idx, unused=0):
         super().on_train_batch_start(batch, batch_idx, unused)
@@ -526,7 +589,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 self.device
             )
     def training_step(self, batch, batch_idx):
-        opt = self.optimizers()
+        # opt = self.optimizers()
 
         total_loss = 0.0
         
@@ -546,23 +609,29 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 batch, batch_idx, guidance="video_diffusion")
             total_loss += out_video_diffusion["loss"]
         
-        out_zero123 = self.training_substep(
-            batch, batch_idx, guidance="zero123")
-        total_loss += out_zero123["loss"]
+        if self.cfg.loss.lambda_sds_zero123 > 0 or self.cfg.loss.lambda_sds_mesh_zero123 > 0:
+            out_zero123 = self.training_substep(
+                batch, batch_idx, guidance="zero123")
+            total_loss += out_zero123["loss"]
         
         out_ref = self.training_substep(
             batch, batch_idx, guidance="ref")
         total_loss += out_ref["loss"]
+        
+        if self.cfg.loss.lambda_clip > 0:
+            out_clip = self.training_substep(
+                batch, batch_idx, guidance="clip")
+            total_loss += out_clip["loss"]
         
         if self.cfg.freq.inter_frame_reg > 0 and self.global_step % self.cfg.freq.inter_frame_reg == 0:
             total_loss += self.training_substep_inter_frames(batch, batch_idx)
 
         self.log("train/loss", total_loss, prog_bar=True)
 
-        if not self.automatic_optimization:
-            total_loss.backward()
-            opt.step()
-            opt.zero_grad(set_to_none=True)
+        # if not self.automatic_optimization:
+        #     total_loss.backward()
+        #     opt.step()
+        #     opt.zero_grad(set_to_none=True)
 
         return {"loss": total_loss}
 
@@ -578,7 +647,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             "kwargs": {"data_format": "HWC"},
                         }
                     ]
-                    if "rgb" in batch
+                    if "rgb" in out
                     else []
                 )
                 + (
@@ -589,7 +658,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             "kwargs": {"data_format": "HWC"},
                         }
                     ]
-                    if "mesh_comp_rgb" in batch
+                    if "mesh_comp_rgb" in out
                     else []
                 )
                 + (
@@ -600,7 +669,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             "kwargs": {"data_format": "HWC"},
                         }
                     ]
-                    if "comp_rgb" in batch
+                    if "comp_rgb" in out
                     else []
                 )
                 + (
@@ -668,14 +737,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
             fps=10,
             step=self.true_global_step
         )
-           
-        ref_psnr = self.psnr(out["comp_rgb"], batch["rgb"])
-        ref_ssim = self.ssim(out["comp_rgb"], batch["rgb"])
-        ref_lpips = self.lpips(out["comp_rgb"], batch["rgb"])
 
-        self.log(f"metric/PSNR", ref_psnr)
-        self.log(f"metric/SSIM", ref_ssim)
-        self.log(f"metric/LPIPS", ref_lpips)
 
     def on_validation_epoch_end(self):
         pass
@@ -695,13 +757,17 @@ class SuGaR4DGen(BaseSuGaRSystem):
                     if "rgb" in batch
                     else []
                 )
-                + [
-                    {
-                        "type": "rgb",
-                        "img": out["comp_rgb"][0],
-                        "kwargs": {"data_format": "HWC"},
-                    },
-                ]
+                + (
+                    [
+                        {
+                            "type": "rgb",
+                            "img": out["comp_rgb"][0],
+                            "kwargs": {"data_format": "HWC"},
+                        }
+                    ] 
+                    if "comp_rgb" in batch
+                    else []
+                )
                 + (
                     [
                         {
