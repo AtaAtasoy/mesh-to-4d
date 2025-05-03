@@ -20,8 +20,7 @@ from .base import BaseSuGaRSystem
 from ..geometry.gaussian_base import BasicPointCloud
 from ..geometry.sugar import SuGaRModel
 from ..utils.sugar_utils import SuGaRRegularizer
-from torchvision.utils import save_image
-from extern.ldm_zero123.modules.evaluate.evaluate_perceptualsim import perceptual_sim, ssim_metric, psnr
+from extern.ldm_zero123.modules.evaluate.evaluate_perceptualsim import ssim_metric, psnr
 from ..utils.loss_utils import ssim
 
 
@@ -177,7 +176,10 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
             set_loss("mask", F.mse_loss(gt_mask.float(), out["comp_mask"]))
             
             # SSIM loss
-            set_loss("ssim", 1 - ssim(gt_rgb, out["comp_rgb"] * gt_mask.float()))
+            ssim_value = ssim(gt_rgb, out["comp_rgb"] * gt_mask.float())
+            if not ssim_value.requires_grad:
+                raise RuntimeError("SSIM tensor does not have a gradient.")
+            set_loss("ssim", 1 - ssim_value)
             
 
             # depth loss
@@ -194,7 +196,7 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
 
             # relative depth loss
             if self.C(self.cfg.loss.lambda_depth_rel) > 0:
-                valid_gt_depth = batch["ref_depth"][gt_mask.squeeze(-1)]  # [B,]
+                valid_gt_depth = batch["ref_depth"][gt_mask]  # [B,]
                 valid_pred_depth = out["comp_depth"][gt_mask]  # [B,]
                 set_loss(
                     "depth_rel", 1 - self.pearson(valid_pred_depth, valid_gt_depth)
@@ -386,13 +388,13 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
                     [
                         {
                             "type": "grayscale",
-                            "img": batch["ref_depth"][0],
-                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                            "img": batch["ref_depth"][0, :, :, 0],
+                            "kwargs": {"cmap": None},
                         }, 
                         {
                             "type": "grayscale",
                             "img": out["comp_depth"][0, :, :, 0],
-                            "kwargs": {"cmap": None, "data_range": (0, 1)},
+                            "kwargs": {"cmap": None},
                         }
                     ]
                    if self.C(self.cfg.loss.lambda_depth) > 0

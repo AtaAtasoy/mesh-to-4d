@@ -24,6 +24,7 @@ from .geometry import (
 from .renderer import (
     diff_sugar_rasterizer_normal,
     diff_sugar_rasterizer_temporal,
+    diff_mesh_rasterizer,
 )
 from .system import (
     sugar_4dgen,

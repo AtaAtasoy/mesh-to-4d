@@ -167,7 +167,7 @@ def load_split_data(cfg, split: str, rank: torch.device):
         raise ValueError(f"{split} data directory must be provided via {split}_data_path config parameter")
 
     # Validate and load images
-    images_dir = os.path.join(data_dir, 'images')
+    images_dir = os.path.join(data_dir, 'rgb')
     if not os.path.exists(images_dir):
         raise ValueError(f"{split} images directory not found at {images_dir}")
     
@@ -206,7 +206,7 @@ def load_split_data(cfg, split: str, rank: torch.device):
     
     return {
         'image_paths': image_paths,
-        'intrinsics': torch.FloatTensor(intrinsics).to(rank),
+        'intrinsics': torch.FloatTensor(intrinsics),
         'cam_2_world_poses': cam_2_world_poses,
         'world_2_cam_poses': world_2_cam_poses,
         'full_proj_transforms': full_proj_transforms,

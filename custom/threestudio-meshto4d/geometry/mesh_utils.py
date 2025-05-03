@@ -3,7 +3,6 @@ from pytorch3d.structures import Meshes, utils
 from pytorch3d.renderer import TexturesUV, TexturesVertex
 import torch
 from threestudio import info
-from sys import exit
 
 
 def poisson_mesh_reconstruction(points, normals=None):

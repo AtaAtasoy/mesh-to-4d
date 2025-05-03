@@ -16,6 +16,8 @@ from torch.autograd import Variable
 from math import exp
 import numpy as np
 from tqdm import tqdm
+from threestudio.utils.typing import *
+
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -88,7 +90,6 @@ def compute_reliability_map_batched(rgbs: torch.Tensor, device="cuda:0") -> torc
             [
                 T.ConvertImageDtype(torch.float32),
                 T.Normalize(mean=0.5, std=0.5),  # map [0, 1] into [-1, 1]
-                T.Resize(size=(256, 256)),
             ]
         )
         batch = transforms(batch)
@@ -131,7 +132,7 @@ def compute_reliability_map_batched(rgbs: torch.Tensor, device="cuda:0") -> torc
     reliability_tensor = torch.stack(reliability_list, dim=0)  # shape: (N, 1, H, W)
     
     # Permute to the desired output shape: (N, H, W, 1)
-    reliability_tensor = reliability_tensor.permute(0, 2, 3, 1).contiguous()
+    reliability_tensor = reliability_tensor.permute(0, 2, 3, 1).contiguous().cpu()
     
     return reliability_tensor # N, H, W, 1
     
@@ -148,7 +149,6 @@ def compute_reliability_map(video_frames: torch.tensor, device="cuda:0") -> torc
             [
                 T.ConvertImageDtype(torch.float32),
                 T.Normalize(mean=0.5, std=0.5),  # map [0, 1] into [-1, 1]
-                T.Resize(size=(256, 256)),
             ]
         )
         batch = transforms(batch)
@@ -180,8 +180,134 @@ def compute_reliability_map(video_frames: torch.tensor, device="cuda:0") -> torc
         
     reliability_maps.append(reliability_maps[-1]) # duplicate last reliability map for frame N-1
     
-    return torch.tensor(np.stack(reliability_maps)).float().to(device) # N, H, W
+    return torch.tensor(np.stack(reliability_maps)).float() # N, H, W
 
+def compute_forward_optical_flow(rgbs: torch.Tensor, device="cuda:0") -> torch.Tensor:
+    """
+    Computes the forward optical flow magnitude from each frame to the next using the RAFT model.
+    The flow magnitude is computed as the L2 norm of the flow vector.
+    
+    Args:
+        rgbs (torch.Tensor): Batch of RGB images with shape (N, H, W, 3) and values in [0, 1].
+        device (str): Device to run the model on (default "cuda:0").
+    
+    Returns:
+        torch.Tensor: Optical flow magnitude maps with shape (N, H, W).
+                    The flow is computed for pairs [frame_i, frame_i+1] and the last map is duplicated.
+    """
+    from torchvision.models.optical_flow import raft_large
+
+    # Initialize RAFT.
+    model = raft_large(pretrained=True, progress=False).to(device)
+    model.eval()
+
+    # Preprocessing function: converts (H, W, 3) to normalized tensor (C, H, W).
+    def preprocess(frame):
+        # Convert shape: (H, W, 3) -> (3, H, W)
+        if frame.dim() == 3 and frame.shape[-1] == 3:
+            frame = frame.permute(2, 0, 1)
+        transform_pipeline = T.Compose([
+            T.ConvertImageDtype(torch.float32),
+            T.Normalize(mean=0.5, std=0.5),  # Map [0,1] -> [-1,1]
+        ])
+        return transform_pipeline(frame)
+
+    N, H, W, _ = rgbs.shape
+    flows = []
+
+    # Compute forward optical flow for each consecutive pair.
+    with torch.no_grad():
+        for i in range(N - 1):
+            frame1 = preprocess(rgbs[i]).unsqueeze(0).to(device)  # shape: (1, 3, H, W)
+            frame2 = preprocess(rgbs[i+1]).unsqueeze(0).to(device)  # shape: (1, 3, H, W)
+            predicted_flow = model(frame1, frame2)
+            # predicted_flow is a list; take the last prediction, first element in batch.
+            flow_vector = predicted_flow[-1][0].permute(1, 2, 0)  # shape: (H, W, 2)
+            # Compute flow magnitude (L2 norm over the 2 channels)
+            flow_mag = torch.linalg.norm(flow_vector, dim=-1)  # shape: (H, W)
+            flows.append(flow_mag.cpu())
+
+    # Duplicate the last computed flow magnitude to match the input frame count.
+    if flows:
+        flows.append(flows[-1])
+    else:
+        # In case there is only one frame, create a zeros flow.
+        flows.append(torch.zeros(H, W))
+    
+    flow_stack = torch.stack(flows, dim=0)  # shape: (N, H, W)
+    return flow_stack
+
+def select_key_frames(reliability_maps: torch.Tensor, top_k=4):
+    motion_scores = 1 - reliability_maps.mean(dim=(1, 2))  # Higher score = more motion
+    topk_indices = torch.topk(motion_scores, k=top_k).indices
+    return sorted(topk_indices.tolist())
+
+def load_novel_frames(novel_frames_path: str, white_background: bool = False, number_of_novel_frames: int = 6, video_length: int = 81) -> tuple[torch.Tensor, torch.Tensor]:
+    import cv2
+    import os
+    import re
+    """
+    Loads key frame RGB images and their corresponding masks.
+    
+    Args:
+        novel_frames_path (str): Path to the directory containing novel frame images.
+    
+    Returns:
+        tuple: A tuple containing two tensors:
+            - Novel frame RGB images (shape: [N, M, H, W, 3]), where M is number_of_novel_frames and N is video_length
+            - Corresponding masks (shape: [N, M, H, W, 1])
+    """
+    
+    print(f"INFO: Loading novel frames from {novel_frames_path}, white_background={white_background}, number_of_novel_frames={number_of_novel_frames}")
+    
+    # List and filter out files which don't follow the pattern or have novel index >= number_of_novel_frames
+    novel_img_paths = sorted(os.listdir(novel_frames_path))
+    novel_img_paths = [
+        f for f in novel_img_paths
+        if re.match(r"\d{4}_\d{4}\.png", f) and int(f.split('_')[1].split('.')[0]) < number_of_novel_frames
+    ]
+    
+    all_novel_rgsbs = []  # Will hold all the novel frames. 6 frames for each key frame
+    all_novel_masks = []  # Will hold all the masks. 6 frames for each key frame
+    novel_imgs = []
+    novel_masks = []
+    for i, img_path in enumerate(novel_img_paths):
+        rgba_path = os.path.join(novel_frames_path, img_path)
+        print(f"Loading {rgba_path}")
+        
+        rgba = cv2.cvtColor(
+            cv2.imread(rgba_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGRA2RGBA
+        ).astype(np.float32) / 255.0
+        rgb = rgba[..., :3]
+        rgb: Float[torch.Tensor, "1 H W 3"] = (
+            torch.from_numpy(rgb).unsqueeze(0).contiguous()
+        )
+        mask: Float[torch.Tensor, "1 H W 1"] = (
+            torch.from_numpy(rgba[..., 3:] > 0.5).unsqueeze(0)
+        )
+        if white_background:
+            rgb[~mask[..., 0], :] = 1.0
+        
+        novel_imgs.append(rgb)
+        novel_masks.append(mask)
+        if (i + 1) % number_of_novel_frames == 0:  # Group every number_of_novel_frames
+            novel_imgs = torch.cat(novel_imgs, dim=0)
+            novel_masks = torch.cat(novel_masks, dim=0)
+            all_novel_rgsbs.append(novel_imgs)
+            all_novel_masks.append(novel_masks)
+            
+            novel_imgs = []
+            novel_masks = []
+        
+        if len(all_novel_rgsbs) == video_length:
+            break
+                    
+    all_novel_rgsbs = torch.stack(all_novel_rgsbs, dim=0)  # Shape: (N, number_of_novel_frames, H, W, 3)
+    all_novel_masks = torch.stack(all_novel_masks, dim=0)    # Shape: (N, number_of_novel_frames, H, W, 1)
+    
+    print(f"INFO: Loaded {len(all_novel_rgsbs)} key frames with {number_of_novel_frames} novel frames each.")
+    
+    return all_novel_rgsbs, all_novel_masks
 
 def weighted_mse_loss(gt_rgb: torch.Tensor, pred_rgb: torch.Tensor, reliability_map: torch.Tensor) -> torch.Tensor:
     """Computes weighted MSE loss"""
@@ -208,8 +334,94 @@ def temporal_smoothness_loss(vertices: torch.Tensor) -> torch.Tensor:
 
 cosine_sim = torch.nn.CosineSimilarity()
 
+def safe_cosine_similarity(features, targets, eps=1e-8):
+    # Compute the dot product along the appropriate dimension
+    dot = (features * targets).sum(dim=-1)
+    # Compute norms
+    norm_features = features.norm(p=2, dim=-1)
+    norm_targets = targets.norm(p=2, dim=-1)
+    # Add epsilon to denominator to avoid division by zero
+    return dot / (norm_features * norm_targets + eps)
+
 def cosine_sum(features, targets):
-    return -cosine_sim(features, targets).sum()
+    return -safe_cosine_similarity(features, targets).sum()
 
 def cosine_avg(features, targets):
-    return -cosine_sim(features, targets).mean()
+    return -safe_cosine_similarity(features, targets).mean()
+
+def robust_mask_loss(pred_mask, gt_mask, logits, lambda_reg=0.1):
+    """
+    pred_mask, gt_mask: [B, H, W, 1]
+    logits: [1, H, W, 1] - learnable, passed through sigmoid to get weights
+    """
+    weights = torch.sigmoid(logits)  # values in (0, 1)
+    residual = (pred_mask - gt_mask) ** 2
+    weighted_loss = (weights ** 2) * residual
+    reg = lambda_reg * ((1 - weights ** 2) ** 2)
+    return weighted_loss.mean() + reg.mean()
+
+
+def robust_mask_loss_vectorized(pred_mask, gt_mask, frame_indices, mask_logits_all, lambda_reg=0.1):
+    """
+    pred_mask, gt_mask: [B, H, W, 1]
+    frame_indices: [B] int tensor with values in [0, 80]
+    mask_logits_all: [81, H, W, 1]
+    """
+
+    B, H, W, _ = pred_mask.shape
+
+    # Gather weights for each sample in batch: shape [B, H, W, 1]
+    weights = torch.sigmoid(mask_logits_all[frame_indices])  # advanced indexing
+
+    residual = (pred_mask - gt_mask) ** 2
+    weighted_loss = (weights ** 2) * residual
+    reg_term = lambda_reg * ((1 - weights ** 2) ** 2)
+
+    return weighted_loss.mean() + reg_term.mean()
+
+def robust_rgb_loss(pred_rgb, gt_rgb, frame_indices, rgb_logits_all, lambda_reg=0.1):
+    """
+    pred_rgb, gt_rgb: [B, 3, H, W]
+    frame_indices: [B] int tensor in [0, 80]
+    rgb_logits_all: [81, H, W, 1]
+    """
+    # [B, H, W, 1] → [B, 1, H, W] → [B, 3, H, W]
+    weights = torch.sigmoid(rgb_logits_all[frame_indices])  # [B, H, W, 1]
+    weights = weights.permute(0, 3, 1, 2)  # → [B, 1, H, W]
+    weights = weights.expand(-1, 3, -1, -1)  # → [B, 3, H, W]
+    weights = weights.permute(0, 2, 3, 1) # B, H, W, 3
+
+    residual = (pred_rgb - gt_rgb) ** 2
+    weighted_loss = (weights ** 2) * residual
+    reg_term = lambda_reg * ((1 - weights ** 2) ** 2)
+
+    return weighted_loss.mean() + reg_term.mean()
+
+
+def to_colormap_image(tensor_2d):
+    import matplotlib.pyplot as plt
+    import io
+    from PIL import Image
+    
+    fig, ax = plt.subplots()
+    ax.imshow(tensor_2d.numpy(), cmap='viridis')
+    ax.axis('off')
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    image = Image.open(buf)
+    plt.close(fig)
+    return image
+
+
+def save_rgb_weights_as_png(logits, save_dir="rgb_weights", current_epoch=0):
+    import os
+    import matplotlib.pyplot as plt
+    os.makedirs(save_dir, exist_ok=True)
+
+    weights_all = torch.sigmoid(logits).detach().cpu()  # [81, H, W, 1]
+
+    for i in range(weights_all.shape[0]):
+        weights = weights_all[i].squeeze()  # [H, W]
+        weights = (weights - weights.min()) / (weights.max() - weights.min() + 1e-8)
+        plt.imsave(f"{save_dir}/frame_{i:04d}_epoch_{current_epoch:04d}.png", weights.numpy(), cmap="plasma")
