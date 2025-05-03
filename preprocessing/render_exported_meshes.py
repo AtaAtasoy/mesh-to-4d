@@ -14,8 +14,10 @@ from pytorch3d.renderer import (
     MeshRasterizer,
     HardPhongShader,
     AmbientLights,
+    PointLights,
     BlendParams,
 )
+from PIL import Image
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Generate 3D mesh animation video')
@@ -38,7 +40,7 @@ total_meshes = len(mesh_filenames)
 
 # Rendering settings
 raster_settings = RasterizationSettings(
-    image_size=1024,
+    image_size=480,
     blur_radius=0.0,
     faces_per_pixel=1,
 )
@@ -51,15 +53,18 @@ for i, azimuth_angle in tqdm(enumerate(azimuth_angles)):
     for start in range(0, total_meshes, batch_size):
         end = min(start + batch_size, total_meshes)
         batch_meshes = load_objs_as_meshes(mesh_filenames[start:end], device=device)
-
-        dist = torch.tensor([3.8] * len(batch_meshes), device=device)
-        elev = torch.tensor([5.0] * len(batch_meshes), device=device)
+        
+        
         azim = torch.tensor([azimuth_angle] * len(batch_meshes), device=device)
+        fixed_fovy_deg = 30.0
+        dist = 0.5 / torch.sin(torch.deg2rad(torch.tensor(fixed_fovy_deg / 2)))
+        elev = torch.tensor([0] * len(batch_meshes), device=device)
+        camera_distances = torch.full_like(elev, dist)
 
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim, device=device)
-        cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
+        cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fixed_fovy_deg)
 
-        lights = AmbientLights(device=device)
+        lights = PointLights(device=device, location=[[0.0, 0.0, 3.0]])
 
         renderer = MeshRenderer(
             rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
@@ -84,7 +89,7 @@ for i, azimuth_angle in tqdm(enumerate(azimuth_angles)):
     output_video_path = os.path.join(images_out_dir, f"mesh_animation_{azimuth_angle}.mp4")
 
     for idx, image in enumerate(all_images):
-        plt.imsave(os.path.join(images_out_dir, f"{idx}.png"), image.squeeze())
+        Image.fromarray((255 * image).astype(np.uint8).clip(0, 255)).save(os.path.join(images_out_dir, f"{idx}.png"))
 
     with imageio.get_writer(output_video_path, mode='I', fps=fps) as writer:
         for image in tqdm(all_images):
