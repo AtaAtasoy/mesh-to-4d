@@ -170,6 +170,7 @@ class TemporalStableZero123Guidance(BaseObject):
     @torch.no_grad()
     def guidance_eval(self, cond, t_orig, latents, noise_pred):
         # use only 50 timesteps, and find nearest of those to t
+        latents = latents.to(self.weights_dtype)
         self.scheduler.set_timesteps(50)
         self.scheduler.timesteps_gpu = self.scheduler.timesteps.to(self.device)
         bs = latents.shape[0]  # batch size
@@ -226,10 +227,10 @@ class TemporalStableZero123Guidance(BaseObject):
 
         return {
             "noise_levels": fracs,
-            "imgs_noisy": imgs_noisy,
-            "imgs_1step": imgs_1step,
-            "imgs_1orig": imgs_1orig,
-            "imgs_final": imgs_final,
+            "imgs_noisy": imgs_noisy.permute(0, 3, 1, 2),
+            "imgs_1step": imgs_1step.permute(0, 3, 1, 2),
+            "imgs_1orig": imgs_1orig.permute(0, 3, 1, 2),
+            "imgs_final": imgs_final.permute(0, 3, 1, 2),
         }
 
     @torch.amp.autocast('cuda', enabled=False)
@@ -240,6 +241,7 @@ class TemporalStableZero123Guidance(BaseObject):
     @torch.amp.autocast('cuda', enabled=False)
     def prepare_embeddings(self, image_path: str) -> None:
         # load cond image for zero123
+        threestudio.info(f"Loading cond image {image_path} ...")
         assert os.path.exists(image_path)
         rgba = cv2.cvtColor(
             cv2.imread(image_path, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGRA2RGBA
@@ -270,7 +272,7 @@ class TemporalStableZero123Guidance(BaseObject):
         for i in range(self.num_frames):
             image_path = os.path.join(video_dir, f"{i:03}_rgba.png")
             if not os.path.exists(image_path):
-                image_path = os.path.join(video_dir, f"{i}.png")
+                image_path = os.path.join(video_dir, f"{i:04d}.png")
             outs = self.prepare_embeddings(image_path)
             rgb_256.append(outs[0])
             c_crossattn.append(outs[1])
