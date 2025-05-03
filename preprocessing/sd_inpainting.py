@@ -38,9 +38,9 @@ if __name__ == "__main__":
     parser.add_argument('--image', type=str, default='image.png', help='image path')
     parser.add_argument('--mask', type=str, default='mask.png', help='mask path')
     parser.add_argument('--output', type=str, default='output', help='output folder. The output will be <output>/inpainted_<index>.png')
-    parser.add_argument('--prompt', type=str, default='A photo of a cat', help='prompt')
+    parser.add_argument('--prompt', type=str, default='plain background', help='prompt')
     parser.add_argument('--negative_prompt', type=str, default="", help='negative prompt')
     parser.add_argument('--num_images_per_prompt', type=int, default=1, help='num images per prompt')
-    parser.parse_args()
+    args = parser.parse_args()
     
-    inpaint(parser.image, parser.mask, parser.output, parser.prompt, parser.negative_prompt, parser.num_images_per_prompt)
+    inpaint(args.image, args.mask, args.output, args.prompt, args.negative_prompt, args.num_images_per_prompt)

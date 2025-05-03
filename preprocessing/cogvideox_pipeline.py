@@ -8,18 +8,19 @@ from transformers import T5EncoderModel
 from torchao.quantization import quantize_, int8_weight_only
 from argparse import ArgumentParser
 import os 
+import random
 
 # @torch.compile()
 def generate_video(image_path: str, prompt: str, negative_prompt: str="Excessive streching. Unrealistic. Streching.", num_videos_per_prompt: int=4, output_dir: str="output"):
     quantization = int8_weight_only
 
-    text_encoder = T5EncoderModel.from_pretrained("THUDM/CogVideoX-5b-I2V", subfolder="text_encoder", torch_dtype=torch.bfloat16)
+    text_encoder = T5EncoderModel.from_pretrained("THUDM/CogVideoX1.5-5B-I2V", subfolder="text_encoder", torch_dtype=torch.bfloat16)
     quantize_(text_encoder, quantization())
 
-    transformer = CogVideoXTransformer3DModel.from_pretrained("THUDM/CogVideoX-5b-I2V",subfolder="transformer", torch_dtype=torch.bfloat16)
+    transformer = CogVideoXTransformer3DModel.from_pretrained("THUDM/CogVideoX1.5-5B-I2V",subfolder="transformer", torch_dtype=torch.bfloat16)
     quantize_(transformer, quantization())
 
-    vae = AutoencoderKLCogVideoX.from_pretrained("THUDM/CogVideoX-5b-I2V", subfolder="vae", torch_dtype=torch.bfloat16)
+    vae = AutoencoderKLCogVideoX.from_pretrained("THUDM/CogVideoX1.5-5B-I2V", subfolder="vae", torch_dtype=torch.bfloat16)
     quantize_(vae, quantization())
 
     # Create pipeline and run inference
@@ -34,23 +35,19 @@ def generate_video(image_path: str, prompt: str, negative_prompt: str="Excessive
     pipe.enable_sequential_cpu_offload()
     pipe.vae.enable_tiling()
     pipe.vae.enable_slicing()
-    # pipe = CogVideoXPipeline.from_pretrained(
-    #     "THUDM/CogVideoX-2b",
-    #     torch_dtype=torch.float16
-    # )
-
-    # pipe.to("cuda")
 
     image = load_image(image=image_path)
     videos = pipe(
         prompt=prompt,
         image=image,
-        num_videos_per_prompt=num_videos_per_prompt,
+        num_videos_per_prompt=1,
         num_inference_steps=50,
         num_frames=81,
         guidance_scale=6,
-        generator=torch.Generator(device="cuda").manual_seed(42),
+        generator=torch.Generator(device="cuda").manual_seed(random.randint(0, 100000)),
         negative_prompt=negative_prompt,
+        height=768,
+        width=768,
     ).frames
 
     for i, video in enumerate(videos):

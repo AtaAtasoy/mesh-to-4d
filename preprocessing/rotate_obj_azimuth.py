@@ -1,41 +1,26 @@
 import torch
 from pytorch3d.io import load_obj
+from pytorch3d.transforms import axis_angle_to_matrix, Rotate
 import os
 import argparse
 
+def rotate_verts(verts: torch.tensor, angle: float):
+    """Rotate the mesh vertices with a given azimuth angle"""
+    DEG_2_RAD = torch.pi / 180
 
-def center_and_normalize_to_unit_cube(verts):
-    """Center and scale vertices so that the mesh fits in a unit cube."""
-    # Compute bounding box
-    min_coords = verts.min(dim=0)[0]
-    max_coords = verts.max(dim=0)[0]
-    center = (max_coords + min_coords) / 2
-    
-    # Center vertices
-    verts_centered = verts - center
-    
-    # Scale to unit cube
-    scale = (max_coords - min_coords).max()
-    verts_normalized = verts_centered / scale
-        
-    return verts_normalized
+    rotation_axes = torch.as_tensor([0, 1, 0])
+    rotation_rad = angle * DEG_2_RAD
+    axis_angle = rotation_axes * rotation_rad
 
-def center_and_normalize_to_unit_sphere(verts):
-    """Center and scale vertices so that the mesh fits in a unit sphere."""
-    # Compute bounding box
-    min_coords = verts.min(dim=0)[0]
-    max_coords = verts.max(dim=0)[0]
-    center = (max_coords + min_coords) / 2
+    rot_matrix = axis_angle_to_matrix(axis_angle=axis_angle)
+    rotation = Rotate(rot_matrix)
+
+    print(f"Rotation matrix: {rot_matrix}")
+
+    rotated_verts = rotation.transform_points(verts)
+    return rotated_verts
     
-    # Center vertices
-    verts_centered = verts - center
-    
-    # Scale to unit sphere
-    max_distance = torch.norm(verts_centered, dim=1).max()
-    verts_normalized = verts_centered / (2 * max_distance)  # Scale to fit within radius 0.5
-        
-    return verts_normalized
- 
+
 def save_obj_with_textures(
     filename, 
     verts, 
@@ -83,19 +68,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Center and normalize a mesh.")
     parser.add_argument('--mesh_path', type=str, required=True, help='Path to the mesh file (e.g., .obj).')
     parser.add_argument('--output_path', type=str, required=True, help='Path to the normalized mesh.')
+    parser.add_argument('--azimuth', type=float, default=45, help='Angle to rotate the mesh')
     args = parser.parse_args()
 
-    os.makedirs((args.output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
+    print(f"Created {os.path.dirname(args.output_path)}")
 
     # 1. Load source mesh with textures
     verts, faces, aux = load_obj(args.mesh_path, load_textures=True)
     
-    verts = center_and_normalize_to_unit_sphere(verts)
+    # 2. Center and normalize
+    # verts_normalized = center_and_normalize(verts)
     
+    verts_rotated = rotate_verts(verts=verts, angle=args.azimuth)
+
     # 3. Save the new mesh, reusing the original MTL/textures
     save_obj_with_textures(
         f"{args.output_path}/{os.path.basename(args.mesh_path)}", 
-        verts, 
+        verts_rotated, 
         faces, 
         aux, 
         mtl_filename="material.mtl"  # or wherever your .mtl resides
