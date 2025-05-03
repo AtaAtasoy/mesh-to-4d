@@ -2,6 +2,8 @@ import numpy as np
 from pytorch3d.structures import Meshes, utils
 from pytorch3d.renderer import TexturesUV, TexturesVertex
 import torch
+from threestudio import info
+from sys import exit
 
 
 def poisson_mesh_reconstruction(points, normals=None):
@@ -155,3 +157,34 @@ def convert_to_textureVertex(textures_uv: TexturesUV, meshes:Meshes) -> Textures
     verts_colors_packed = torch.zeros_like(meshes.verts_packed())
     verts_colors_packed[meshes.faces_packed()] = textures_uv.faces_verts_textures_packed()  # (*)
     return TexturesVertex(utils.packed_to_list(verts_colors_packed, meshes.num_verts_per_mesh()))
+
+def calculate_volume(vertices, faces):
+    """
+    Calculate the volume of a batch of closed 3D meshes using PyTorch tensor operations.
+
+    Parameters:
+    - vertices: torch.Tensor with shape (B, N, 3) containing vertex coordinates for each mesh in the batch.
+    - faces: torch.Tensor with shape (B, M, 3) containing indices into the vertices tensor, where each row defines a triangle face.
+
+    Returns:
+    - volume: torch.Tensor of shape (B,) containing the absolute volume of each mesh.
+    """
+    B = vertices.shape[0]
+    # Create batch indices to index into the first dimension of vertices for each mesh.
+    batch_indices = torch.arange(B, device=vertices.device).unsqueeze(1)  # Shape (B, 1)
+
+    # Gather the vertices for each face for each mesh in the batch.
+    # This uses advanced indexing so that for each mesh b, v0[b] = vertices[b, faces[b, :, 0]]
+    v0 = vertices[batch_indices, faces[:, :, 0]]
+    v1 = vertices[batch_indices, faces[:, :, 1]]
+    v2 = vertices[batch_indices, faces[:, :, 2]]
+    
+    # Compute the cross product for each triangle face along the last dimension.
+    cross_prod = torch.cross(v1, v2, dim=2)
+    
+    # Compute the dot product of v0 with the cross product for each triangle face.
+    dot_prod = torch.sum(v0 * cross_prod, dim=2)
+    
+    # Sum over all faces for each mesh and then compute the absolute volume (divided by 6).
+    volume = torch.abs(torch.sum(dot_prod, dim=1)) / 6.0
+    return volume

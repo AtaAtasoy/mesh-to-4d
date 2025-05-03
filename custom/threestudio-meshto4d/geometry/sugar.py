@@ -22,7 +22,7 @@ from pytorch3d.io import load_objs_as_meshes
 
 from .gaussian_base import SH2RGB, RGB2SH
 from ..utils.sugar_utils import get_one_ring_neighbors
-from ..geometry.mesh_utils import convert_to_textureVertex
+from ..geometry.mesh_utils import convert_to_textureVertex, calculate_volume
 
 
 def inverse_sigmoid(x):
@@ -178,7 +178,7 @@ class SuGaRModel(BaseGeometry):
         # Load mesh with open3d
         threestudio.info(f"Loading mesh to bind from: {self.cfg.surface_mesh_to_bind_path}...")
         if mesh is None:
-            self.torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path])
+            self.torch3d_mesh = load_objs_as_meshes([self.cfg.surface_mesh_to_bind_path], device=self.device)
             vertex_textures = convert_to_textureVertex(self.torch3d_mesh.textures, self.torch3d_mesh)
             
             
@@ -202,6 +202,9 @@ class SuGaRModel(BaseGeometry):
         verts, faces, vert_colors = self.prune_isolated_points(
             verts, faces, vert_colors
         )
+        self.base_mesh_wks = compute_wks(self.torch3d_mesh)
+        self.base_mesh_volume = calculate_volume(torch.as_tensor(verts[None, ...], device=self.device),
+                                                       torch.as_tensor(faces[None, ...], device=self.device))
         self.register_buffer(
             "_surface_mesh_faces", torch.as_tensor(faces, device=self.device)
         )

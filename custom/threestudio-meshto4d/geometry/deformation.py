@@ -70,8 +70,6 @@ class ModelHiddenParams(ParamGroup):
         self.no_dr = False
         self.no_do = True
         self.use_res = True
-        self.wks_dim = 16
-        self.use_extra_features = False
 
 
 def get_normalized_directions(directions):
@@ -308,7 +306,7 @@ class Head_Res_Net(nn.Module):
 
 
 class Deformation(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=27, input_ch_time=9, skips=[], args=None, use_res=False, wks_dim=16, use_extra_features=False):
+    def __init__(self, D=8, W=256, input_ch=27, input_ch_time=9, skips=[], args=None, use_res=False):
         super(Deformation, self).__init__()
         self.D = D
         self.W = W
@@ -318,18 +316,12 @@ class Deformation(nn.Module):
 
         self.no_grid = args.no_grid  # False
         self.grid = HexPlaneField(args.bounds, args.kplanes_config, args.multires)
-        self.use_extra_features = use_extra_features
-        
-        if self.use_extra_features:
-            input_dim = self.grid.feat_dim + 3 + wks_dim
-        else:
-            input_dim = self.grid.feat_dim
 
         self.use_res = use_res
         if not self.use_res:
             self.pos_deform, self.scales_deform, self.rotations_deform, self.opacity_deform = self.create_net()
         else:
-            self.pos_deform, self.scales_deform, self.rotations_deform, self.opacity_deform = self.create_res_net(input_dim=input_dim)
+            self.pos_deform, self.scales_deform, self.rotations_deform, self.opacity_deform = self.create_res_net()
         self.args = args
 
     def create_net(self):
@@ -351,14 +343,14 @@ class Deformation(nn.Module):
                 nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 4)), \
                 nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 1))
 
-    def create_res_net(self, input_dim=0):
+    def create_res_net(self, ):
 
         mlp_out_dim = 0
 
         if self.no_grid:
-            self.feature_out = [nn.Linear(7, self.W)]
+            self.feature_out = [nn.Linear(4, self.W)]
         else:
-            self.feature_out = [nn.Linear(input_dim, self.W)]
+            self.feature_out = [nn.Linear(mlp_out_dim + self.grid.feat_dim, self.W)]
 
         for i in range(self.D - 1):
             self.feature_out.append(nn.ReLU())
@@ -375,7 +367,7 @@ class Deformation(nn.Module):
                 Head_Res_Net(self.W, 4), \
                 Head_Res_Net(self.W, 1)
 
-    def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_emb, point_normals=None, wks=None):
+    def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_emb):
         if not self.use_res:
             if self.no_grid:
                 h = torch.cat([rays_pts_emb[:, :3], time_emb[:, :1]], -1)
@@ -386,13 +378,8 @@ class Deformation(nn.Module):
 
             h = self.feature_out(h)
         else:
-            grid_feature = self.grid(rays_pts_emb[:, :3], time_emb[:, :1]) # N, 128
-            if self.use_extra_features:
-                feature_vector = torch.cat([grid_feature, wks, point_normals], dim=-1) # N, 128 + wks_dim + 3
-
-                h = self.feature_out(feature_vector)
-            else:
-                h = self.feature_out(grid_feature)
+            grid_feature = self.grid(rays_pts_emb[:, :3], time_emb[:, :1])
+            h = self.feature_out(grid_feature)
         return h
 
     def forward(self, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity=None, time_emb=None):
@@ -430,8 +417,8 @@ class Deformation(nn.Module):
 
         return pts, scales, rotations, opacity
     
-    def forward_dynamic_delta(self, rays_pts_emb, time_emb=None, normals=None, wks=None):
-        hidden = self.query_time(rays_pts_emb, None, None, time_emb, normals, wks).float()
+    def forward_dynamic_delta(self, rays_pts_emb, time_emb=None):
+        hidden = self.query_time(rays_pts_emb, None, None, time_emb).float()
         dx = self.pos_deform(hidden)
         ds = None if self.args.no_ds else self.scales_deform(hidden)
         dr = None if self.args.no_dr else self.rotations_deform(hidden)
@@ -447,7 +434,6 @@ class Deformation(nn.Module):
     def forward_dynamic_xyz_and_rotation(self, rays_pts_emb, time_emb):
         hidden = self.query_time(rays_pts_emb, None, None, time_emb).float()
         dx = self.pos_deform(hidden)
-        # pts = rays_pts_emb[:, :3] + dx
         dr = self.rotations_deform(hidden)
         return dx, dr
 
@@ -494,15 +480,13 @@ class DeformationNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(timenet_width, timenet_output)
         )
-        self.wks_dim = args.wks_dim
-        self.use_extra_features = args.use_extra_features
 
         self.use_res = args.use_res
         if self.use_res:
             print("Using zero-init and residual")
         self.deformation_net = Deformation(W=net_width, D=defor_depth,
                                            input_ch=(4 + 3) + ((4 + 3) * scale_rotation_pe) * 2,
-                                           input_ch_time=timenet_output, args=args, use_res=self.use_res, wks_dim=self.wks_dim, use_extra_features=self.use_extra_features)
+                                           input_ch_time=timenet_output, args=args, use_res=self.use_res)
         self.register_buffer('time_poc', torch.FloatTensor([(2 ** i) for i in range(timebase_pe)]))
         self.register_buffer('pos_poc', torch.FloatTensor([(2 ** i) for i in range(posbase_pe)]))
         self.register_buffer('rotation_scaling_poc', torch.FloatTensor([(2 ** i) for i in range(scale_rotation_pe)]))
@@ -510,14 +494,11 @@ class DeformationNetwork(nn.Module):
         self.apply(initialize_weights)
 
         if self.use_res:
-            # self.deformation_net.feature_out.initialize_weights()
             self.deformation_net.pos_deform.initialize_weights()
             self.deformation_net.scales_deform.initialize_weights()
             self.deformation_net.rotations_deform.initialize_weights()
             self.deformation_net.opacity_deform.initialize_weights()
 
-        # self.deformation_net.feature_out.apply(initialize_zeros_weights)
-        # print(self)
 
     def forward(self, point, scales=None, rotations=None, opacity=None, times_sel=None):
         if times_sel is not None:
@@ -530,21 +511,15 @@ class DeformationNetwork(nn.Module):
         return points
 
     def forward_dynamic(self, point, scales=None, rotations=None, opacity=None, times_sel=None):
-        # times_emb = poc_fre(times_sel, self.time_poc)
-
         means3D, scales, rotations, opacity = self.deformation_net(point,
                                                                    scales,
                                                                    rotations,
                                                                    opacity,
-                                                                   # times_feature,
                                                                    times_sel)
         return means3D, scales, rotations, opacity
     
-    def forward_dynamic_delta(self, point, times_sel, normals=None, wks=None):
-        if self.use_extra_features:
-            return self.deformation_net.forward_dynamic_delta(point, times_sel, normals=normals, wks=wks)
-        else:
-            return self.deformation_net.forward_dynamic_delta(point, times_sel)
+    def forward_dynamic_delta(self, point, times_sel):
+        return self.deformation_net.forward_dynamic_delta(point, times_sel)
 
     def forward_dynamic_xyz(self, point, times_sel):
         return self.deformation_net.forward_dynamic_xyz(point, times_sel)

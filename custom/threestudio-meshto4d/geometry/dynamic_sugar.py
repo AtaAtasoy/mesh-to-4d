@@ -21,7 +21,7 @@ from pytorch3d.io import load_objs_as_meshes
 from .sugar import SuGaRModel
 from .deformation import DeformationNetwork, ModelHiddenParams
 from ..utils.dual_quaternions import DualQuaternion
-# from .mesh_utils import compute_deformation_graph_features, compute_deformation_graph_wks
+from .mesh_utils import compute_wks, calculate_volume
 
 from tqdm import trange
 
@@ -146,8 +146,6 @@ class DynamicSuGaRModel(SuGaRModel):
             deformation_args.no_dr = False
             deformation_args.no_ds = not (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs")
             deformation_args.no_do = not (self.cfg.skinning_method == "hybrid")
-            deformation_args.use_extra_features = self.cfg.use_extra_features
-            self.use_extra_features = self.cfg.use_extra_features
 
             self._deformation = DeformationNetwork(deformation_args)
             self._deformation_table = torch.empty(0)
@@ -393,6 +391,33 @@ class DynamicSuGaRModel(SuGaRModel):
         frame_idx: Int[Tensor, "N_t"] = None
     ) -> Float[Tensor, "N_t N_v 3"]:
         return self.get_timed_surface_mesh(timestamp, frame_idx).verts_normals_padded()
+    
+    # ========= Compute WKS attributes ======== #
+    def get_timed_mesh_wks(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"] = None
+    ) -> Float[Tensor, "N_t N_v 100"]:
+        meshes = self.get_timed_surface_mesh(timestamp, frame_idx)
+        # verts, faces = meshes.verts_padded(), meshes.faces_padded()
+        
+        wks = compute_wks(meshes)
+        
+        return wks
+    
+    def get_timed_mesh_volume(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"] = None
+    ) -> Float[Tensor, "N_t 1"]:
+        timed_meshes = self.get_timed_surface_mesh(timestamp, frame_idx)
+        
+        verts, faces = timed_meshes.verts_padded(), timed_meshes.faces_padded()
+        
+        volumes = calculate_volume(verts, faces)
+        
+        return volumes
+        
         
     
     # ========= Compute deformation nodes' attributes ======== #
@@ -458,20 +483,7 @@ class DynamicSuGaRModel(SuGaRModel):
             pts = torch.cat([pts] * num_t, dim=0)
             ts = timestamp.unsqueeze(-1).repeat_interleave(num_pts, dim=0)
             
-            if self.use_extra_features:
-                downpcd = o3d.geometry.PointCloud()
-                downpcd.points = o3d.utility.Vector3dVector(pts.cpu().numpy())
-                
-                if downpcd.has_normals():
-                    pcd_normals = torch.from_numpy(np.array(downpcd.normalize_normals().normals, dtype=np.float32)).to(self.device)
-                else:
-                    downpcd.estimate_normals()
-                    pcd_normals = torch.from_numpy(np.array(downpcd.normalize_normals().normals, dtype=np.float32)).to(self.device)
-                    
-                normals = torch.cat([pcd_normals] * num_t, dim=0)
-                trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1, normals, self.node_wks_vector)
-            else:
-                trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1)
+            trans, rot, d_scale, d_opacity = self._deformation.forward_dynamic_delta(pts, ts * 2 - 1)
 
             # trans, rot = self._deformation.forward_dg_trans_and_rotation(pts, ts * 2 - 1)
             trans = trans.reshape(num_t, num_pts, 3)
@@ -730,7 +742,7 @@ class DynamicSuGaRModel(SuGaRModel):
         opacity = self.get_opacity
         colors_precomp = self.get_points_rgb()
         return means3D, scales, rotations, opacity, colors_precomp
-
+    
     def _get_gs_xyz_from_vertex(self, xyz_vert=None) -> Float[Tensor, "N_t N_gs 3"]:
         if self.binded_to_surface_mesh:
             if xyz_vert is None:
@@ -864,14 +876,6 @@ class DynamicSuGaRModel(SuGaRModel):
                                             / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
                                             )
         
-        # self.node_wks_vector = compute_deformation_graph_features(mesh, 
-        #                                                      self._xyz_neighbor_node_idx, 
-        #                                                      self._xyz_neighbor_nodes_weights,
-        #                                                      n_nodes
-        #                                                      )
-        # if self.cfg.use_extra_features:
-        #     self.node_wks_vector = compute_deformation_graph_wks(nodes=self._deform_graph_node_xyz.detach().cpu().numpy(), node_neighbor_idx=self._xyz_neighbor_node_idx.detach().cpu().numpy(), node_neighbor_weights=self._xyz_neighbor_nodes_weights.detach().cpu().numpy())
-
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         super().update_step(epoch, global_step, on_load_weights)
 
