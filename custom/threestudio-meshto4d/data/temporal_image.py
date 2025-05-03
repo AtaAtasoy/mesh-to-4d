@@ -2,13 +2,11 @@ import bisect
 import math
 import os
 from dataclasses import dataclass, field
-from PIL import Image
 import cv2
 import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 import threestudio
@@ -21,15 +19,12 @@ from threestudio.utils.ops import (
     get_projection_matrix,
     get_ray_directions,
     get_rays,
-    convert_pose,
 )
 
 from threestudio.utils.typing import *
 
 from threestudio.data.image import (
     SingleImageDataModuleConfig,
-    SingleImageIterableDataset,
-    SingleImageDataset,
 )
 from .uncond import (
     RandomCameraDataModuleConfig,
@@ -38,8 +33,7 @@ from .uncond import (
     RandomCameraArbiraryDataset,
 )
 
-from ..utils.loss_utils import compute_reliability_map, compute_reliability_map_batched
-from copy import deepcopy
+from ..utils.loss_utils import compute_reliability_map, load_novel_frames, compute_forward_optical_flow
 
 @dataclass
 class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
@@ -48,11 +42,13 @@ class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
     num_frames: int = 14
     norm_timestamp: bool = False
     white_background: bool = False
+    use_novel_frames: bool = True
+    use_video_random_camera: bool = True
     requires_flow: bool = False
-    use_clip_camera: bool = False
-    clip_random_camera: dict = field(default_factory=dict)
-
-
+    video_random_camera: dict = field(default_factory=dict)
+    use_fixed_pose_camera: bool = True
+    fixed_pose_camera: dict = field(default_factory=dict)
+    
 class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
     def __init__(self, cfg: Any, split: str) -> None:
         super().__init__()
@@ -67,10 +63,10 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             self.cfg.random_camera.update(
                 {"batch_size": self.num_frames * self.rand_cam_bs}
             )
-        if self.cfg.use_clip_camera:
-            self.clip_rand_cam_bs = self.cfg.clip_random_camera.batch_size
+        if self.cfg.use_video_random_camera:
+            self.video_diffusion_bs = self.cfg.video_random_camera.batch_size
         self.setup(self.cfg, split)
-        # self.single_image_dataset = SingleImageIterableDataset(self.cfg, split)        
+        self.num_key_frames = self.num_frames // 2        
 
     def setup(self, cfg, split):
         self.split = split
@@ -90,20 +86,20 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
                 self.random_pose_generator = RandomCameraDataset(
                     random_camera_cfg, split
                 )
-
-        if self.cfg.use_clip_camera:
+        
+        if self.cfg.use_video_random_camera:
             random_camera_cfg = parse_structured(
-                RandomCameraDataModuleConfig, self.cfg.get("clip_random_camera", {})
+                RandomCameraDataModuleConfig, self.cfg.get("video_random_camera", {})
             )
             if split == "train":
-                self.clip_random_pose_generator = RandomCameraIterableDataset(
+                self.video_random_camera = RandomCameraIterableDataset(
                     random_camera_cfg
                 )
             else:
-                self.clip_random_pose_generator = RandomCameraDataset(
+                self.video_random_camera = RandomCameraDataset(
                     random_camera_cfg, split
                 )
-
+                              
         elevation_deg = torch.FloatTensor([self.cfg.default_elevation_deg])
         azimuth_deg = torch.FloatTensor([self.cfg.default_azimuth_deg])
         camera_distance = torch.FloatTensor([self.cfg.default_camera_distance])
@@ -216,10 +212,10 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
         )
         rgb = rgba[..., :3]
         rgb: Float[Tensor, "1 H W 3"] = (
-            torch.from_numpy(rgb).unsqueeze(0).contiguous().to(self.rank)
+            torch.from_numpy(rgb).unsqueeze(0).contiguous()
         )
         mask: Float[Tensor, "1 H W 1"] = (
-            torch.from_numpy(rgba[..., 3:] > 0.5).unsqueeze(0).to(self.rank)
+            torch.from_numpy(rgba[..., 3:] > 0).unsqueeze(0)
         )
         if self.cfg.white_background:
             rgb[~mask[..., 0], :] = 1.0
@@ -237,64 +233,101 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
 
         # load depth
         if self.cfg.requires_depth:
-            depth_path = frame_path.replace("_rgba.png", "_depth.png")
+            depth_path = frame_path.replace("video_frames", "depth_frames").replace(".png", ".npy")
             assert os.path.exists(depth_path)
-            depth = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
+            # depth = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
 
-            depth = cv2.resize(
-                depth, (self.width, self.height), interpolation=cv2.INTER_AREA
-            )
-            depth: Float[Tensor, "1 H W 1"] = (
-                torch.from_numpy(depth.astype(np.float32) / 255.0)
-                .unsqueeze(0)
-                .to(self.rank)
-            )
-            self.depths.append(depth)
-            print(
-                f"[INFO] single image dataset: load depth {depth_path} {depth.shape}"
-            )
-        else:
-            depth = None
+            # depth = cv2.resize(
+            #     depth, (self.width, self.height), interpolation=cv2.INTER_AREA
+            # )
+            # depth: Float[Tensor, "1 H W 1"] = (
+            #     torch.from_numpy(depth.astype(np.float32) / 255.0)
+            #     .unsqueeze(0)
+            #     .unsqueeze(-1)
+            #     # .to(self.rank)
+            # )
+                        
+            # self.depths.append(depth)
+            # print(
+            #     f"[INFO] single image dataset: load depth {depth_path} {depth.shape}"
+            # )
+            depth_np = np.load(depth_path)
+            depth_tensor = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0).unsqueeze(-1)
+            print(f"Info] single image dataset: load normal {depth_path} {depth_tensor.shape}")
+
+            self.depths.append(depth_tensor)
 
         # load normal
         if self.cfg.requires_normal:
-            normal_path = frame_path.replace("_rgba.png", "_normal.png")
+            normal_path = frame_path.replace("video_frames", "normal_frames").replace(".png", ".npy")
             assert os.path.exists(normal_path)
-            normal = cv2.imread(normal_path, cv2.IMREAD_UNCHANGED)
-            normal = cv2.resize(
-                normal, (self.width, self.height), interpolation=cv2.INTER_AREA
-            )
-            normal: Float[Tensor, "1 H W 3"] = (
-                torch.from_numpy(normal.astype(np.float32) / 255.0)
-                .unsqueeze(0)
-                .to(self.rank)
-            )
-            self.normals.append(normal)
-            print(
-                f"[INFO] single image dataset: load normal {normal_path} {normal.shape}"
-            )
-        else:
-            normal = None
+            # normal = cv2.imread(normal_path, cv2.IMREAD_UNCHANGED)
+            # normal = cv2.resize(
+            #     normal, (self.width, self.height), interpolation=cv2.INTER_AREA
+            # )
+            # normal: Float[Tensor, "1 H W 3"] = (
+            #     torch.from_numpy(normal.astype(np.float32) / 255.0)
+            #     .unsqueeze(0)
+            # )
+            # self.normals.append(normal)
+            # print(
+            #     f"[INFO] single image dataset: load normal {normal_path} {normal.shape}"
+            # )
+            normal_np = np.load(normal_path)
+            normal_tensor = torch.from_numpy(normal_np.astype(np.float32)).unsqueeze(0)
+            print(f"Info] single image dataset: load normal {normal_path} {normal_tensor.shape}")
+            self.normals.append(normal_tensor)
 
     def load_video_frames(self):
         assert os.path.exists(self.cfg.video_frames_dir), f"Could not find image {self.cfg.video_frames_dir}!"
         self.rgbs = []
         self.masks = []
+        
+        # if self.cfg.requires_depth:
+        #     input_dir = os.path.dirname(self.cfg.video_frames_dir)
+        #     video_name = os.path.basename(self.cfg.video_frames_dir)
+
+        #     depth_folder = input_dir.replace("video_frames", "depths")  
+        #     depth_np = np.load(os.path.join(depth_folder, f"{video_name}_pred.npy"))
+            
+        #     # depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np))
+            
+        #     self.depths = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(-1)
+        # else:
+        #     self.depths = None
+            
+            
+        # if self.cfg.requires_normal:
+        #     input_dir = os.path.dirname(self.cfg.video_frames_dir)
+        #     video_name = os.path.basename(self.cfg.video_frames_dir)
+
+        #     normal_folder = input_dir.replace("video_frames", "normals")  
+        #     normal_npz = np.load(os.path.join(normal_folder, f"{video_name}_pred.npz"))
+        #     normals = normal_npz["depth"]
+        #     self.normals = torch.from_numpy(normals.astype(np.float32))
+        # else:
+        #     self.normals = None
+            
         if self.cfg.requires_depth:
             self.depths = []
+        else:
+            self.depths = None
+            
         if self.cfg.requires_normal:
             self.normals = []
+        else:
+            self.normals = None
 
-        # all_frame_paths = glob.glob(os.path.join(self.cfg.video_frames_dir, "*_rgba.png"))
+        # all_frame_paths = glob.glob(os.path.join(self.cfg.video_frames_dir, "*.png"))
         # self.video_length = len(all_frame_paths)
 
         for idx in range(self.video_length):
-            try:
-                frame_path = os.path.join(self.cfg.video_frames_dir, f"{idx:03}_rgba.png")
-                self.load_single_frame(frame_path)
-            except:
-                frame_path = os.path.join(self.cfg.video_frames_dir, f"{idx}.png")
-                self.load_single_frame(frame_path)
+            # try:
+            #     frame_path = os.path.join(self.cfg.video_frames_dir, f"{idx:03}_rgba.png")
+            #     self.load_single_frame(frame_path)
+            # except:
+            frame_path = os.path.join(self.cfg.video_frames_dir, f"{idx:04d}.png")
+            self.load_single_frame(frame_path)
 
         self.rgbs = torch.cat(self.rgbs, dim=0)
         self.masks = torch.cat(self.masks, dim=0)
@@ -308,13 +341,228 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
         else:
             self.normals = None
         
+        if self.cfg.use_novel_frames:
+            novel_frames_path = self.cfg.video_frames_dir.replace("video_frames", "novel_frames")
+            self.novel_frame_rgbs, self.novel_frame_masks = load_novel_frames(novel_frames_path=novel_frames_path, video_length=self.video_length, number_of_novel_frames=6)
+            # self.flow_reliability = compute_reliability_map(self.rgbs)
+            # self.key_frame_indices = select_key_frames(self.flow_reliability, top_k=8)
+            # threestudio.info(f"[INFO] selected key frame indices: {self.key_frame_indices}")
+        
         if self.cfg.requires_flow:
-            self.flow_reliability = compute_reliability_map(self.rgbs)
+            if not hasattr(self, 'flow_reliability'):
+                self.flow_reliability = compute_reliability_map(self.rgbs)
+            if not hasattr(self, 'optical_flows'):
+                self.optical_flows = compute_forward_optical_flow(self.rgbs)
         else:
             self.flow_reliability = None
 
     def get_all_images(self):
         return self.rgbs
+    
+    def create_views_for_multiview(self, num_key_timesteps=4):        
+        elevation_azimuth_pairs = torch.tensor([
+            (20, 30), (-10, 90), (20, 150), (-10, 210), (20, 270), (-10, 330),
+        ], dtype=torch.float32)
+        n_views = elevation_azimuth_pairs.shape[0]
+        elevation_deg = elevation_azimuth_pairs[:, 0] 
+        azimuth_deg = elevation_azimuth_pairs[:, 1]
+        
+        height = width = 320
+        fixed_fovy_deg = 49.13
+        fovy_deg = torch.full_like(elevation_deg, fixed_fovy_deg)
+
+        # Calculate camera distance based on fixed FOV = 30 degrees
+        # Formula: dist = half_object_size / tan(fovy / 2)
+        # Assuming half_object_size = 0.5 for consistency, adjust if needed
+        fixed_fovy_deg = 30.0
+        dist = 0.5 / torch.sin(torch.deg2rad(torch.tensor(fixed_fovy_deg / 2)))
+        camera_distances = torch.full_like(elevation_deg, dist)
+        # print(f"Using fixed poses for test split. N_views={n_views}, FOV={fixed_fovy_deg}, CamDist={dist:.4f}")
+        
+        # Convert spherical coordinates to cartesian coordinates
+        elevation = elevation_deg * math.pi / 180
+        azimuth = azimuth_deg * math.pi / 180
+        
+        camera_positions: Float[Tensor, "B 3"] = torch.stack(
+            [
+            camera_distances * torch.cos(elevation) * torch.sin(azimuth),
+            camera_distances * torch.sin(elevation),
+            camera_distances * torch.cos(elevation) * torch.cos(azimuth),
+            ],
+            dim=-1,
+        )
+
+        # default scene center at origin
+        center: Float[Tensor, "B 3"] = torch.zeros_like(camera_positions)
+        # default camera up direction as +z
+        up: Float[Tensor, "B 3"] = torch.as_tensor([0, 1, 0], dtype=torch.float32)[
+            None, :
+        ].repeat(n_views, 1)
+
+        fovy_deg: Float[Tensor, "B"] = torch.full_like(
+            elevation_deg, fixed_fovy_deg
+        )
+        fovy = fovy_deg * math.pi / 180
+        light_positions: Float[Tensor, "B 3"] = camera_positions
+
+        lookat: Float[Tensor, "B 3"] = F.normalize(center - camera_positions, dim=-1)
+        right: Float[Tensor, "B 3"] = F.normalize(torch.cross(lookat, up), dim=-1)
+        up = F.normalize(torch.cross(right, lookat), dim=-1)
+        c2w3x4: Float[Tensor, "B 3 4"] = torch.cat(
+            [torch.stack([right, -up, lookat], dim=-1), camera_positions[:, :, None]],
+            dim=-1,
+        )
+        c2w: Float[Tensor, "B 4 4"] = torch.cat(
+            [c2w3x4, torch.zeros_like(c2w3x4[:, :1])], dim=1
+        )
+        c2w[:, 3, 3] = 1.0
+                
+        # get directions by dividing directions_unit_focal by focal length
+        focal_length: Float[Tensor, "B"] = (
+            0.5 * height / torch.tan(0.5 * fovy)
+        )
+        directions_unit_focal = get_ray_directions(
+            H=height, W=width, focal=1.0
+        )
+        directions: Float[Tensor, "B H W 3"] = directions_unit_focal[
+            None, :, :, :
+        ].repeat(n_views, 1, 1, 1)
+        directions[:, :, :, :2] = (
+            directions[:, :, :, :2] / focal_length[:, None, None, None]
+        )
+
+        rays_o, rays_d = get_rays(
+            directions, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize
+        )
+        proj_mtx: Float[Tensor, "B 4 4"] = get_projection_matrix(
+            fovy, width / height, 1.0, 100.0
+        )  # FIXME: hard-coded near and far
+        mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, proj_mtx)
+        
+        views = {
+            "rays_o": rays_o,
+            "rays_d": rays_d,
+            "mvp_mtx": mvp_mtx,
+            "camera_positions": camera_positions,
+            "light_positions": light_positions,
+            "elevation": elevation_deg,
+            "azimuth": azimuth_deg,
+            "camera_distances": camera_distances,
+            "height": height,
+            "width": width,
+            "fovy": fovy,
+            "c2w": c2w,
+        }
+        
+        views = {
+            key: value.unsqueeze(0).repeat(num_key_timesteps, *([1] * value.dim()))
+            if isinstance(value, torch.Tensor) else value
+            for key, value in views.items()
+        }
+        
+        return views
+    
+    def create_views_for_multiview_sv3d(self, num_key_timesteps=4):    
+        height = width = 576
+        
+        azimuths_deg = torch.linspace(0, 360, 21 + 1)[1:] % 360
+        azimuths_rad = torch.as_tensor([torch.deg2rad((a - azimuths_deg[-1]) % 360) for a in azimuths_deg], dtype=torch.float32)
+        azimuths_rad[:-1].sort() 
+        azimuths_deg = torch.as_tensor([torch.rad2deg(a) for a in azimuths_rad], dtype=torch.float32)
+        elevation_deg = torch.full_like(azimuths_deg, self.cfg.default_elevation_deg)
+
+
+        fixed_fovy_deg = 20.0
+        fovy_deg = torch.full_like(elevation_deg, fixed_fovy_deg)
+
+        camera_distances = torch.full_like(elevation_deg, 3.8)
+        # print(f"Using fixed poses for test split. N_views={n_views}, FOV={fixed_fovy_deg}, CamDist={dist:.4f}")
+        
+        # Convert spherical coordinates to cartesian coordinates
+        elevation = elevation_deg * math.pi / 180
+        azimuth = azimuths_rad
+        
+        n_views = 21
+        
+        camera_positions: Float[Tensor, "B 3"] = torch.stack(
+            [
+            camera_distances * torch.cos(elevation) * torch.sin(azimuth),
+            camera_distances * torch.sin(elevation),
+            camera_distances * torch.cos(elevation) * torch.cos(azimuth),
+            ],
+            dim=-1,
+        )
+
+        # default scene center at origin
+        center: Float[Tensor, "B 3"] = torch.zeros_like(camera_positions)
+        # default camera up direction as +z
+        up: Float[Tensor, "B 3"] = torch.as_tensor([0, 1, 0], dtype=torch.float32)[
+            None, :
+        ].repeat(n_views, 1)
+
+        fovy_deg: Float[Tensor, "B"] = torch.full_like(
+            elevation_deg, fixed_fovy_deg
+        )
+        fovy = fovy_deg * math.pi / 180
+        light_positions: Float[Tensor, "B 3"] = camera_positions
+
+        lookat: Float[Tensor, "B 3"] = F.normalize(center - camera_positions, dim=-1)
+        right: Float[Tensor, "B 3"] = F.normalize(torch.cross(lookat, up), dim=-1)
+        up = F.normalize(torch.cross(right, lookat), dim=-1)
+        c2w3x4: Float[Tensor, "B 3 4"] = torch.cat(
+            [torch.stack([right, -up, lookat], dim=-1), camera_positions[:, :, None]],
+            dim=-1,
+        )
+        c2w: Float[Tensor, "B 4 4"] = torch.cat(
+            [c2w3x4, torch.zeros_like(c2w3x4[:, :1])], dim=1
+        )
+        c2w[:, 3, 3] = 1.0
+                
+        # get directions by dividing directions_unit_focal by focal length
+        focal_length: Float[Tensor, "B"] = (
+            0.5 * height / torch.tan(0.5 * fovy)
+        )
+        directions_unit_focal = get_ray_directions(
+            H=height, W=width, focal=1.0
+        )
+        directions: Float[Tensor, "B H W 3"] = directions_unit_focal[
+            None, :, :, :
+        ].repeat(n_views, 1, 1, 1)
+        directions[:, :, :, :2] = (
+            directions[:, :, :, :2] / focal_length[:, None, None, None]
+        )
+
+        rays_o, rays_d = get_rays(
+            directions, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize
+        )
+        proj_mtx: Float[Tensor, "B 4 4"] = get_projection_matrix(
+            fovy, width / height, 1.0, 100.0
+        )  # FIXME: hard-coded near and far
+        mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, proj_mtx)
+        
+        views = {
+            "rays_o": rays_o,
+            "rays_d": rays_d,
+            "mvp_mtx": mvp_mtx,
+            "camera_positions": camera_positions,
+            "light_positions": light_positions,
+            "elevation": elevation_deg,
+            "azimuth": azimuths_deg,
+            "camera_distances": camera_distances,
+            "height": height,
+            "width": width,
+            "fovy": fovy,
+            "c2w": c2w,
+        }
+        
+        views = {
+            key: value.unsqueeze(0).repeat(num_key_timesteps, *([1] * value.dim()))
+            if isinstance(value, torch.Tensor) else value
+            for key, value in views.items()
+        }
+        
+        return views
+                
 
     def collate(self, batch) -> Dict[str, Any]:
         rand_frame_idx = np.random.choice(self.video_length, (self.num_frames,), replace=False, )
@@ -349,21 +597,41 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             batch_rand_cam["timestamp"] = timestamps.repeat_interleave(self.rand_cam_bs)
             batch_rand_cam["frame_indices"] = frame_indices.repeat_interleave(self.rand_cam_bs)
             batch["random_camera"] = batch_rand_cam
-
-        if self.cfg.use_clip_camera:
-            rand_frame_idx = np.random.choice(self.video_length, (self.clip_rand_cam_bs,), replace=True, )
-            timestamps = self.timestamps[rand_frame_idx]
-            frame_indices = self.frame_indices[rand_frame_idx]
-
-            batch_rand_cam = self.clip_random_pose_generator.collate(None)
-            batch_rand_cam["timestamp"] = timestamps
-            batch_rand_cam["frame_indices"] = frame_indices
-            batch["clip_random_camera"] = batch_rand_cam
             
-            batch_base_rand_cam = deepcopy(batch_rand_cam)
-            batch_base_rand_cam["timestamp"] = self.timestamps[0].repeat_interleave(self.clip_rand_cam_bs)
-            batch_base_rand_cam["frame_indices"] = self.frame_indices[0].repeat_interleave(self.clip_rand_cam_bs)
-            batch["clip_base_random_camera"] = batch_base_rand_cam
+        if self.cfg.use_video_random_camera:
+            batch_video_diffusion = self.video_random_camera.collate(None)
+            for key, value in batch_video_diffusion.items():
+                if isinstance(value, torch.Tensor):
+                    batch_video_diffusion[key] = value.repeat_interleave(self.video_length, dim=0)        
+            batch_video_diffusion["timestamp"] = self.timestamps
+            batch_video_diffusion["frame_indices"] = self.frame_indices
+            batch["video_random_camera"] = batch_video_diffusion
+        
+        # if self.cfg.use_novel_frames:
+        #     multiview_poses = self.create_views_for_multiview_sv3d(num_key_timesteps=len(self.frame_indices[::2]))
+        #     multiview_poses["rgb"] = self.novel_frame_rgbs[self.frame_indices[::2]]
+        #     multiview_poses["mask"] = self.novel_frame_masks[self.frame_indices[::2]]
+        #     random_pose_idx = np.random.randint(0, 21)
+        #     for key, value in multiview_poses.items():
+        #         if isinstance(value, torch.Tensor):
+        #             multiview_poses[key] = value[:, random_pose_idx, ...]
+        #     multiview_poses["timestamp"] = self.timestamps[self.frame_indices[::2]]
+        #     multiview_poses["frame_indices"] = self.frame_indices[self.frame_indices[::2]]
+        #     batch["multiview_camera"] = multiview_poses
+            
+        if self.cfg.use_novel_frames:
+            key_frame_indices = self.frame_indices[::2] # skip every other frame
+            key_frame_indices = np.random.choice(key_frame_indices, (self.num_frames,))
+            multiview_poses = self.create_views_for_multiview(num_key_timesteps=len(key_frame_indices))
+            multiview_poses["rgb"] = self.novel_frame_rgbs[key_frame_indices]
+            multiview_poses["mask"] = self.novel_frame_masks[key_frame_indices]
+            random_pose = np.random.randint(0, 6)
+            for key, value in multiview_poses.items():
+                if isinstance(value, torch.Tensor):
+                    multiview_poses[key] = value[:, random_pose, ...]
+            multiview_poses["timestamp"] = self.timestamps[key_frame_indices]
+            multiview_poses["frame_indices"] = self.frame_indices[key_frame_indices]
+            batch["multiview_camera"] = multiview_poses
 
         return batch
 
@@ -479,7 +747,7 @@ class TemporalRandomCameraDataset(Dataset):
             directions, c2w, keepdim=True, normalize=self.cfg.rays_d_normalize
         )
         proj_mtx: Float[Tensor, "B 4 4"] = get_projection_matrix(
-            fovy, self.cfg.eval_width / self.cfg.eval_height, 0.1, 1000.0
+            fovy, self.cfg.eval_width / self.cfg.eval_height, 1.0, 100.0
         )  # FIXME: hard-coded near and far
         mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, proj_mtx)
 
@@ -571,7 +839,7 @@ class TemporalRandomImageDataModule(pl.LightningDataModule):
 
     def general_loader(self, dataset, batch_size, collate_fn=None) -> DataLoader:
         return DataLoader(
-            dataset, num_workers=0, batch_size=batch_size, collate_fn=collate_fn
+            dataset, num_workers=8, batch_size=batch_size, collate_fn=collate_fn
         )
 
     def train_dataloader(self) -> DataLoader:

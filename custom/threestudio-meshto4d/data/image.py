@@ -7,13 +7,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
-import threestudio
 from threestudio import register
-from .uncond import (
-    RandomCameraDataModuleConfig,
-    RandomCameraDataset,
-    RandomCameraIterableDataset,
-)
 from threestudio.utils.base import Updateable
 from threestudio.utils.config import parse_structured
 from threestudio.utils.misc import get_rank
@@ -82,9 +76,9 @@ class SingleImageDataBase:
         """
         Get ray directions for all pixels in camera coordinate, using intrinsics.
         """
-        i_coords = torch.arange(H, dtype=torch.float32, device=self.rank).view(-1, 1).repeat(1, W)
-        j_coords = torch.arange(W, dtype=torch.float32, device=self.rank).view(1, -1).repeat(H, 1)
-        ones = torch.ones_like(i_coords, device=self.rank)
+        i_coords = torch.arange(H, dtype=torch.float32).view(-1, 1).repeat(1, W)
+        j_coords = torch.arange(W, dtype=torch.float32).view(1, -1).repeat(H, 1)
+        ones = torch.ones_like(i_coords)
         pixel_coords = torch.stack([j_coords, i_coords, ones], dim=-1)  # Shape (H, W, 3)
 
         # Invert the intrinsics
@@ -107,7 +101,7 @@ class SingleImageDataBase:
         self.rays_d_list = []
         self.mvp_mtx_list = []
         
-        directions = self.get_ray_directions_K(self.height, self.width, self.intrinsics).to(self.rank)
+        directions = self.get_ray_directions_K(self.height, self.width, self.intrinsics)
         
         for i in range(self.num_images):        
             c2w = self.c2ws[i] # [3, 4]
@@ -143,20 +137,11 @@ class SingleImageDataBase:
             )
             rgb = rgba[..., :3]
             rgb: Float[Tensor, "1 H W 3"] = (
-                torch.from_numpy(rgb).unsqueeze(0).contiguous().to(self.rank)
+                torch.from_numpy(rgb).unsqueeze(0).contiguous()
             )
 
-            # mask_path = image_path.replace("rgb", "masks")
-            # assert os.path.exists(mask_path)
-            # mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                        
-            # mask: Float[Tensor, "1 H W 1"] = (
-            #     torch.from_numpy((mask.astype(np.float32) / 255.0) > 0)[:, :, None]
-            #     .unsqueeze(0)
-            #     .to(self.rank)
-            # )
             mask: Float[Tensor, "1 H W 1"] = (
-                torch.from_numpy(rgba[..., 3:] > 0.5).unsqueeze(0).to(self.rank)
+                torch.from_numpy(rgba[..., 3:] > 0.5).unsqueeze(0)
             )
 
             
@@ -190,7 +175,7 @@ class SingleImageDataBase:
                 depth: Float[Tensor, "1 H W 1"] = (
                     torch.from_numpy(depth.astype(np.float32) / 255.0)
                     .unsqueeze(0)
-                    .to(self.rank)
+                    .unsqueeze(-1)
                 )
                 self.depths.append(depth)
             else:
@@ -208,7 +193,6 @@ class SingleImageDataBase:
                 normal: Float[Tensor, "1 H W 3"] = (
                     torch.from_numpy(normal.astype(np.float32) / 255.0)
                     .unsqueeze(0)
-                    .to(self.rank)
                 )
                 self.normals.append(normal)
             else:
@@ -217,10 +201,10 @@ class SingleImageDataBase:
                 
     def load_cam_for_image(self, image_path):
         image_name = os.path.basename(image_path)
-        cam2world = torch.FloatTensor(self.cam2world_dict[image_name]).to(self.rank)
-        world2cam = torch.FloatTensor(self.world2cam_dict[image_name]).to(self.rank)
-        full_proj_transform = torch.FloatTensor(self.full_proj_transforms_dict[image_name]).to(self.rank)
-        camera_centers = torch.FloatTensor(self.camera_centers_dict[image_name]).to(self.rank)
+        cam2world = torch.FloatTensor(self.cam2world_dict[image_name])
+        world2cam = torch.FloatTensor(self.world2cam_dict[image_name])
+        full_proj_transform = torch.FloatTensor(self.full_proj_transforms_dict[image_name])
+        camera_centers = torch.FloatTensor(self.camera_centers_dict[image_name])
         
         return cam2world, world2cam, full_proj_transform, camera_centers
          
@@ -299,22 +283,7 @@ class SingleImageDataset(Dataset, SingleImageDataBase):
 
     def __getitem__(self, index):
         return self.get_batch(index)
-        # if index == 0:
-        #     return {
-        #         'rays_o': self.rays_o[0],
-        #         'rays_d': self.rays_d[0],
-        #         'mvp_mtx': self.mvp_mtx[0],
-        #         'camera_positions': self.camera_position[0],
-        #         'light_positions': self.light_position[0],
-        #         'elevation': self.elevation_deg[0],
-        #         'azimuth': self.azimuth_deg[0],
-        #         'camera_distances': self.camera_distance[0],
-        #         'rgb': self.rgb[0],
-        #         'depth': self.depth[0],
-        #         'mask': self.mask[0]
-        #     }
-        # else:
-        #     return self.random_pose_generator[index - 1]
+
     def collate(self, batch) -> Dict[str, Any]:
         return batch[0]
 
@@ -369,7 +338,7 @@ class SingleImageDataModule(pl.LightningDataModule):
     def general_loader(self, dataset, batch_size, collate_fn=None) -> DataLoader:
         return DataLoader(
             dataset,
-            num_workers=0,
+            num_workers=15,
             batch_size=batch_size,
             collate_fn=collate_fn,
         )
