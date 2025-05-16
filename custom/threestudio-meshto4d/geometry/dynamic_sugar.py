@@ -21,7 +21,7 @@ from pytorch3d.io import load_objs_as_meshes
 from .sugar import SuGaRModel
 from .deformation import DeformationNetwork, ModelHiddenParams
 from ..utils.dual_quaternions import DualQuaternion
-from .mesh_utils import compute_wks, calculate_volume
+from .mesh_utils import calculate_volume
 
 from tqdm import trange
 

@@ -42,8 +42,8 @@ def extract_frames(video_path, output_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract frames from a video file.")
-    parser.add_argument("video_path", type=str, help="Path to the input video file")
-    parser.add_argument("output_dir", type=str, help="Directory to save the extracted frames")
+    parser.add_argument("--video_path", type=str, help="Path to the input video file")
+    parser.add_argument("--output_path", type=str, help="Directory to save the extracted frames")
     args = parser.parse_args()
 
-    extract_frames(args.video_path, args.output_dir)
+    extract_frames(args.video_path, args.output_path)

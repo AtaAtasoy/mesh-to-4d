@@ -36,7 +36,7 @@ def render_front(mesh_path: str, output_path: str, img_width: int=512, img_heigh
         faces_per_pixel=1, 
     )
 
-    blend_params = BlendParams(background_color=(0.0, 0.0, 0.0))  
+    blend_params = BlendParams(background_color=(0.5, 0.5, 0.5))  
 
     # Camera settings (distance=2.7, elev=0.0, azim=0.0)
     R, T = look_at_view_transform(dist=3.8, elev=5.0, azim=azimuth)
@@ -58,7 +58,7 @@ def render_front(mesh_path: str, output_path: str, img_width: int=512, img_heigh
 
     # Render the image
     images = renderer(mesh)
-    image = images[0].cpu().numpy()
+    image = images[0, ..., :3].cpu().numpy()
     image = (image * 255).astype(np.uint8)
     image_pil = Image.fromarray(image)
         

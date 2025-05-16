@@ -202,7 +202,6 @@ class SuGaRModel(BaseGeometry):
         verts, faces, vert_colors = self.prune_isolated_points(
             verts, faces, vert_colors
         )
-        self.base_mesh_wks = compute_wks(self.torch3d_mesh)
         self.base_mesh_volume = calculate_volume(torch.as_tensor(verts[None, ...], device=self.device),
                                                        torch.as_tensor(faces[None, ...], device=self.device))
         self.register_buffer(

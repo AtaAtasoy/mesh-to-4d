@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Remove background from images in a directory.")
-    parser.add_argument("root_dir", type=str, help="Path to the root directory containing images.")
+    parser.add_argument("--root_dir", type=str, help="Path to the root directory containing images.")
     args = parser.parse_args()
 
     root_dir = Path(args.root_dir)
