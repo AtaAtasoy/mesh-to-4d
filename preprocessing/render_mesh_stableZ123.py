@@ -39,7 +39,7 @@ def render_front(mesh_path: str, output_path: str, img_width: int=512, img_heigh
     blend_params = BlendParams(background_color=(0.5, 0.5, 0.5))  
 
     # Camera settings (distance=2.7, elev=0.0, azim=0.0)
-    R, T = look_at_view_transform(dist=3.8, elev=5.0, azim=azimuth)
+    R, T = look_at_view_transform(dist=2.8, elev=5.0, azim=azimuth)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
 
     # Setup lights

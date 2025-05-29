@@ -20,7 +20,7 @@ def is_mesh_inside_unit_sphere(mesh: Meshes, radius: float = 0.5) -> bool:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check if a mesh is inside a unit sphere.")
-    parser.add_argument("mesh_path", type=str, help="Path to the mesh file")
+    parser.add_argument("--mesh_path", type=str, help="Path to the mesh file")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
