@@ -88,6 +88,9 @@ class SuGaRModel(BaseGeometry):
         else:
             self.binded_to_surface_mesh = False
             self._points = torch.empty(0)
+            
+        if self.cfg.skeleton_pred_path is not None:
+            self.parse_joints_pred(self.cfg.skeleton_pred_path)
 
         self.n_gaussians_per_surface_triangle = self.cfg.n_gaussians_per_surface_triangle
 
@@ -110,7 +113,7 @@ class SuGaRModel(BaseGeometry):
             )
         self.all_densities = nn.Parameter(all_densities, requires_grad=self.learn_opacities)
         self.return_one_densities = False
-
+        
         # Beta mode
         if self.cfg.beta_mode == "learnable":
             self._log_beta = torch.empty(0)

@@ -48,6 +48,7 @@ class DynamicSuGaRModel(SuGaRModel):
         num_frames: int = 14
         static_learnable: bool = False
         use_deform_graph: bool = True
+        deformation_driver: str = "dg" # 'dg', 'skeleton'
         dynamic_mode: str = "deformation"  # 'discrete', 'deformation'
 
         n_dg_nodes: int = 1000
@@ -74,6 +75,7 @@ class DynamicSuGaRModel(SuGaRModel):
         skinning_method: str = "hybrid"  # "lbs"(linear blending skinning) or "dqs"(dual-quaternion skinning) or "hybrid"
         use_extra_features: bool = False
 
+        skeleton_pred_path: str = "" # path of the skeleton
 
     cfg: Config
 
@@ -93,13 +95,16 @@ class DynamicSuGaRModel(SuGaRModel):
         self.dynamic_mode = self.cfg.dynamic_mode
 
         if self.cfg.use_deform_graph:
-
-            self.build_deformation_graph(
-                self.cfg.n_dg_nodes,
-                None,
-                nodes_connectivity=self.cfg.dg_node_connectivity,
-                mode=self.cfg.dist_mode
-            )
+            if self.cfg.deformation_driver == "dg":
+                self.build_deformation_graph(
+                    self.cfg.n_dg_nodes,
+                    None,
+                    nodes_connectivity=self.cfg.dg_node_connectivity,
+                    mode=self.cfg.dist_mode
+                )
+            elif self.cfg.deformation_driver == "skeleton":
+                self.parse_joints_pred(self.cfg.skeleton_pred_path)
+                self.build_skeleton_binding(nodes_connectivity=self.cfg.dg_node_connectivity)
 
         if self.dynamic_mode == "discrete":
             # xyz
@@ -392,19 +397,7 @@ class DynamicSuGaRModel(SuGaRModel):
     ) -> Float[Tensor, "N_t N_v 3"]:
         return self.get_timed_surface_mesh(timestamp, frame_idx).verts_normals_padded()
     
-    # ========= Compute WKS attributes ======== #
-    def get_timed_mesh_wks(
-        self,
-        timestamp: Float[Tensor, "N_t"] = None,
-        frame_idx: Int[Tensor, "N_t"] = None
-    ) -> Float[Tensor, "N_t N_v 100"]:
-        meshes = self.get_timed_surface_mesh(timestamp, frame_idx)
-        # verts, faces = meshes.verts_padded(), meshes.faces_padded()
-        
-        wks = compute_wks(meshes)
-        
-        return wks
-    
+    # ========= Compute WKS attributes ======== #    
     def get_timed_mesh_volume(
         self,
         timestamp: Float[Tensor, "N_t"] = None,
@@ -875,6 +868,84 @@ class DynamicSuGaRModel(SuGaRModel):
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights
                                             / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
                                             )
+    
+    def parse_joints_pred(self, joints_pred_path: str):
+        positions = []
+        with open(joints_pred_path, "r") as file:
+            for line in file:
+                tokens = line.strip().split()
+                if tokens and tokens[0] == "joints":
+                    x, y, z = map(float, tokens[2:5]) # Example line: joints joint0 -0.26757812 -0.35693359 -0.16052246
+                    positions.append([x, y, z])
+
+        self.joints_xyz = np.array(positions) 
+        print("Joint positions shape:", self.joints_xyz.shape) # J x 3
+        
+    def build_skeleton_binding(self, nodes_connectivity: int = 4):
+        device = self.device
+        k = nodes_connectivity
+
+        torch3d_mesh = load_objs_as_meshes(
+            [self.cfg.surface_mesh_to_bind_path],
+            device=device
+        )
+        verts_np = torch3d_mesh.verts_list()[0].cpu().numpy()   # [V×3]
+        faces_np = torch3d_mesh.faces_list()[0].cpu().numpy()   # [F×3]
+
+        mesh_o3d = o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = o3d.utility.Vector3dVector(verts_np)
+        mesh_o3d.triangles = o3d.utility.Vector3iVector(faces_np)
+
+        geo_solver = pp3d.MeshHeatMethodDistanceSolver(verts_np, faces_np)
+
+        joints_np = np.asarray(self.joints_xyz, dtype=np.float64)
+        self._deform_graph_node_xyz = torch.from_numpy(joints_np).float().to(device)  # [J×3] # naming it like this to be consistent with the rest of the code
+        J = joints_np.shape[0]
+
+        # Build Open3D point cloud for mesh vertices (to snap joints)
+        mesh_pcd = o3d.geometry.PointCloud()
+        mesh_pcd.points = o3d.utility.Vector3dVector(verts_np)
+        mesh_tree = o3d.geometry.KDTreeFlann(mesh_pcd)
+
+        # For each joint, find the nearest mesh-vertex index
+        nearest_vertex = [
+            np.asarray(mesh_tree.search_knn_vector_3d(joints_np[i], 1)[1])[0]
+            for i in range(J)
+        ] # nearest_vertex is a list of indices of the nearest mesh vertices to each joint
+        target_index = np.array(nearest_vertex)
+
+        # For each vertex, find its nearest k joints (by geodesic rank) & compute weights
+        V = verts_np.shape[0]
+        neighbor_idx_list = []
+        neighbor_wgt_list = []
+        for i in trange(V, desc="Binding vertices to skeleton", leave=False):
+            source_index = np.array([i])
+            # Compute distances from vertex i to all mesh vertices
+            dist_to_joints = geo_solver.compute_distance(source_index)[target_index]  # numpy array [V]
+            # Extract distances at the snapped‐joint indices
+
+            # Sort joints by geodesic distance
+            sorted_j = np.argsort(dist_to_joints)
+            k_n_neighbor = sorted_j[:nodes_connectivity]  # Get the indices of the k nearest joints
+            k_n_plus1_neighbor = sorted_j[:nodes_connectivity + 1]  # Get the indices of the k+1 nearest joints
+            verts_to_neighbor_dists = np.linalg.norm(
+                verts_np[i] - joints_np[k_n_plus1_neighbor], axis=-1
+            )
+            
+            neighbor_idx_list.append(torch.LongTensor(k_n_neighbor).to(device))  # [k]
+            neighbor_wgt_list.append(
+                torch.from_numpy(
+                    (1 - verts_to_neighbor_dists[:nodes_connectivity] / verts_to_neighbor_dists[-1]) ** 2
+                ).float().to(device)  # [k] 
+            )
+
+        # Stack into [V×k] tensors
+        self._xyz_neighbor_node_idx = torch.stack(neighbor_idx_list).long().to(device)    # LongTensor [V×k]
+        self._xyz_neighbor_nodes_weights = torch.stack(neighbor_wgt_list).to(device)    # FloatTensor [V×k] # naming it like this to be consistent with the rest of the code
+        
+        # normalize joint weights
+        self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True))
+
         
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         super().update_step(epoch, global_step, on_load_weights)
