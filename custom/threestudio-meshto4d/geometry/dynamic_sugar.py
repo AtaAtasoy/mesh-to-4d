@@ -307,6 +307,28 @@ class DynamicSuGaRModel(SuGaRModel):
             deformed_vert_pos.append(vert_pos)
         deformed_vert_pos = torch.stack(deformed_vert_pos, dim=0)
         return deformed_vert_pos
+    
+    def get_timed_dg_xyz_attributes(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"] = None,
+    ): 
+        n_t = len(timestamp) if timestamp is not None else len(frame_idx)
+        deformed_dg_xyz = []
+        for i in range(n_t):
+            t = timestamp[i] if timestamp is not None else None
+            f = frame_idx[i] if frame_idx is not None else None
+            key = dict_temporal_key(t, f)
+            if self._cached_timed_dg_xyz.__contains__(key): # Should always be true
+                dg_xyz = self._cached_timed_dg_xyz[key]
+            else:
+                dg_xyz = self.get_timed_dg_w_forward_pass(
+                    t[None] if t is not None else t,
+                    f[None] if f is not None else f
+                )
+            deformed_dg_xyz.append(dg_xyz)
+        deformed_dg_xyz = torch.stack(deformed_dg_xyz, dim=0)
+        return deformed_dg_xyz
 
     def get_timed_vertex_rotation(
         self,
@@ -500,8 +522,126 @@ class DynamicSuGaRModel(SuGaRModel):
             "xyz": trans, "rotation": pp.SO3(rot), "scale": d_scale, "opacity": d_opacity
         }
         return attrs
+    
+    def get_timed_dg(self, dg_node_attrs: Dict[str, Union[torch.Tensor, pp.LieTensor]]) -> Float[Tensor, "N_t N_dg_nodes 3"]:
+        '''
+        Calculate the deformed positions of the deform graph nodes based on their timed attributes.
+        Transformation order: Scale -> Rotate -> Translate (delta).
+        '''
+        rest_dg_node_xyz: Float[Tensor, "N_dg_nodes 3"] = self._deform_graph_node_xyz
+        
+        # Determine n_t (number of time steps) from the input attributes
+        # Assuming 'xyz' (translations) is always present and indicates N_t
+        if "xyz" not in dg_node_attrs or dg_node_attrs["xyz"] is None:
+            raise ValueError("dg_node_attrs must contain 'xyz' tensor to determine N_t.")
+        n_t: int = dg_node_attrs["xyz"].shape[0]
+        
+        if n_t == 0:
+            # Handle case with no time steps, return empty or appropriately shaped tensor
+            return torch.empty((0, rest_dg_node_xyz.shape[0], 3), device=rest_dg_node_xyz.device, dtype=rest_dg_node_xyz.dtype)
 
-    # =========== Compute mesh vertices' attributes ========== #
+        # current_xyz starts as rest positions, expanded for batch operations over N_t
+        # Shape: (1, N_dg_nodes, 3) -> expanded to (N_t, N_dg_nodes, 3)
+        current_xyz = rest_dg_node_xyz.unsqueeze(0).expand(n_t, -1, -1) # Shape: (N_t, N_dg_nodes, 3)
+
+        # 1. Apply scale transformation (if scale is available)
+        # dg_node_attrs["scale"] has shape (N_t, N_dg_nodes, 3, 3) or is None
+        dg_node_scales = dg_node_attrs.get("scale")
+        if dg_node_scales is not None:
+            # Reshape for batch matrix multiplication:
+            # Input tensors for bmm: (B, N, M) and (B, M, P)
+            # Here, B = N_t * N_dg_nodes (number of nodes across all time steps)
+            # dg_node_scales reshaped: (N_t * N_dg_nodes, 3, 3)
+            # current_xyz reshaped: (N_t * N_dg_nodes, 3, 1)
+            num_dg_nodes = current_xyz.shape[1]
+            scaled_xyz = torch.bmm(
+                dg_node_scales.reshape(n_t * num_dg_nodes, 3, 3),
+                current_xyz.reshape(n_t * num_dg_nodes, 3, 1)
+            ).reshape(n_t, num_dg_nodes, 3) # Reshape back to (N_t, N_dg_nodes, 3)
+            current_xyz = scaled_xyz
+        
+        # 2. Apply rotation transformation
+        # dg_node_attrs["rotation"] is pp.LieTensor of shape (N_t, N_dg_nodes, ...)
+        # .matrix() gives shape (N_t, N_dg_nodes, 3, 3)
+        dg_node_rot_matrices = dg_node_attrs["rotation"].matrix()
+        num_dg_nodes = current_xyz.shape[1] # Potentially re-evaluate if current_xyz changed
+        
+        rotated_xyz = torch.bmm(
+            dg_node_rot_matrices.reshape(n_t * num_dg_nodes, 3, 3), 
+            current_xyz.reshape(n_t * num_dg_nodes, 3, 1)           
+        ).reshape(n_t, num_dg_nodes, 3) # Reshape back to (N_t, N_dg_nodes, 3)
+        current_xyz = rotated_xyz
+        
+        # 3. Apply translation (delta)
+        # dg_node_attrs["xyz"] (translations) has shape (N_t, N_dg_nodes, 3)
+        dg_node_translations = dg_node_attrs["xyz"]
+        updated_dg_node_xyz = current_xyz + dg_node_translations
+        
+        return updated_dg_node_xyz
+    
+    
+    def get_timed_dg_w_forward_pass(self, timestamp: Float[Tensor, "N_t"] = None, frame_idx: Int[Tensor, "N_t"] = None) -> Float[Tensor, "N_t N_dg_nodes 3"]:
+        """
+        Calculate the updated positions of the deformation graph nodes.
+        This is done by applying their timed deformation attributes (scale, rotation, translation)
+        to their rest positions. The transformation order is Scale -> Rotate -> Translate.
+        """
+        # Get all timed attributes for the deformation graph nodes
+        # dg_node_attrs will contain 'xyz', 'rotation', and potentially 'scale' and 'opacity'.
+        # - 'xyz': delta translation for the DG nodes.
+        # - 'rotation': rotation of the DG nodes.
+        # - 'scale': scale transformation of the DG nodes.
+        dg_node_attrs = self.get_timed_dg_attributes(timestamp=timestamp, frame_idx=frame_idx)
+        
+        rest_dg_node_xyz = self._deform_graph_node_xyz  # Shape: (N_dg_nodes, 3)
+        
+        # Determine n_t (number of time steps)
+        if timestamp is not None:
+            n_t = timestamp.shape[0]
+        elif frame_idx is not None:
+            n_t = frame_idx.shape[0]
+        else:
+            # This case should ideally be prevented by get_timed_dg_attributes
+            raise ValueError("Either timestamp or frame_idx must be provided and be non-empty.")
+
+        # current_xyz starts as rest positions, expanded for batch operations over N_t
+        # Shape: (1, N_dg_nodes, 3) -> expanded to (N_t, N_dg_nodes, 3)
+        current_xyz = rest_dg_node_xyz.unsqueeze(0).expand(n_t, -1, -1) # Shape: (N_t, N_dg_nodes, 3)
+
+        # 1. Apply scale transformation (if scale is available)
+        # dg_node_attrs["scale"] has shape (N_t, N_dg_nodes, 3, 3) or is None
+        dg_node_scales = dg_node_attrs.get("scale")
+        if dg_node_scales is not None:
+            # Reshape for batch matrix multiplication:
+            # Input tensors for bmm: (B, N, M) and (B, M, P)
+            # Here, B = N_t * N_dg_nodes (number of nodes across all time steps)
+            # dg_node_scales reshaped: (N_t * N_dg_nodes, 3, 3)
+            # current_xyz reshaped: (N_t * N_dg_nodes, 3, 1)
+            scaled_xyz = torch.bmm(
+                dg_node_scales.reshape(-1, 3, 3),
+                current_xyz.reshape(-1, 3, 1)
+            ).reshape(n_t, -1, 3) # Reshape back to (N_t, N_dg_nodes, 3)
+            current_xyz = scaled_xyz
+        
+        # 2. Apply rotation transformation
+        # dg_node_attrs["rotation"] is pp.SO3 of shape (N_t, N_dg_nodes, 4 for quat)
+        # .matrix() gives shape (N_t, N_dg_nodes, 3, 3)
+        dg_node_rot_matrices = dg_node_attrs["rotation"].matrix()
+        
+        rotated_xyz = torch.bmm(
+            dg_node_rot_matrices.reshape(-1, 3, 3), # (N_t * N_dg_nodes, 3, 3)
+            current_xyz.reshape(-1, 3, 1)           # (N_t * N_dg_nodes, 3, 1)
+        ).reshape(n_t, -1, 3) # Reshape back to (N_t, N_dg_nodes, 3)
+        current_xyz = rotated_xyz
+        
+        # 3. Apply translation (delta)
+        # dg_node_attrs["xyz"] (translations) has shape (N_t, N_dg_nodes, 3)
+        dg_node_translations = dg_node_attrs["xyz"]
+        updated_dg_node_xyz = current_xyz + dg_node_translations
+        
+        return updated_dg_node_xyz
+
+    # =========== Compute mesh vertices' attributes ========== #    
     def get_timed_vertex_attributes(
         self,
         timestamp: Float[Tensor, "N_t"] = None,
@@ -518,6 +658,7 @@ class DynamicSuGaRModel(SuGaRModel):
             key = dict_temporal_key(t, f)
             self._deformed_vert_positions[key] = vert_attrs["xyz"][i]
             self._deformed_vert_rotations[key] = vert_attrs["rotation"][i]
+            self._cached_timed_dg_xyz[key] = vert_attrs["deformed_dg"][i] if "deformed_dg" in vert_attrs else None
 
         return vert_attrs
 
@@ -623,6 +764,10 @@ class DynamicSuGaRModel(SuGaRModel):
                     + (1 - vert_lbs_weight)[..., None] * torch.eye(3).to(deformed_vert_scales)
                 )
                 outs["scale"] = deformed_vert_scales
+        
+        if self.cfg.deformation_driver == "skeleton":
+            outs["deformed_dg"] = self.get_timed_dg(dg_node_attrs=dg_node_attrs)
+            
         return outs
 
     def _get_timed_vertex_attributes(
@@ -868,18 +1013,53 @@ class DynamicSuGaRModel(SuGaRModel):
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights
                                             / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
                                             )
-    
+    # ======== Skeleton binding ======== #
     def parse_joints_pred(self, joints_pred_path: str):
         positions = []
+        bone_pairs = []
         with open(joints_pred_path, "r") as file:
             for line in file:
                 tokens = line.strip().split()
-                if tokens and tokens[0] == "joints":
-                    x, y, z = map(float, tokens[2:5]) # Example line: joints joint0 -0.26757812 -0.35693359 -0.16052246
-                    positions.append([x, y, z])
+                if tokens:
+                    if tokens[0] == "joints":
+                        x, y, z = map(float, tokens[2:5]) # Example line: joints joint0 -0.26757812 -0.35693359 -0.16052246
+                        positions.append([x, y, z])
+                    if tokens[0] == "hier":
+                        parent_name, child_name = tokens[1], tokens[2]
+                        parent_idx = int(parent_name.replace("joint", ""))
+                        child_idx  = int(child_name .replace("joint", ""))
+                        bone_pairs.append((parent_idx, child_idx))
+                
 
-        self.joints_xyz = np.array(positions) 
+        self.joints_xyz = torch.from_numpy(np.array(positions)).float().to(self.device)
+        # self.bone_pairs = bone_pairs
         print("Joint positions shape:", self.joints_xyz.shape) # J x 3
+        bone_pairs = torch.tensor(bone_pairs, dtype=torch.long)
+        p_idx, c_idx = bone_pairs.t()
+        
+        rest_vec = self.joints_xyz[p_idx] - self.joints_xyz[c_idx]
+        rest_len = rest_vec.norm(dim=-1)
+        
+        eps = 1e-6
+        if (rest_len < eps).any():
+            from warnings import warn
+            bad = (rest_len < eps).nonzero(as_tuple=False).flatten()
+            warn(
+                f"{bad.numel()} bones have near-zero length; "
+                f"clamping them to {eps:.1e} to keep training stable."
+            )
+            rest_len[bad] = eps    
+        
+        
+        # rest_lengths = []
+        # for (p, c) in self.bone_pairs:
+        #     rest_lengths.append(np.linalg.norm(self.joints_xyz[p] - self.joints_xyz[c]))
+        # self.rest_bone_lengths = torch.from_numpy(np.array(rest_lengths)).float().to(self.device) # Number of bones x 1
+        
+        self.register_buffer("bone_parent_idx", p_idx)
+        self.register_buffer("bone_child_idx",  c_idx)
+        self.register_buffer("rest_bone_lengths", rest_len)
+
         
     def build_skeleton_binding(self, nodes_connectivity: int = 4):
         device = self.device
@@ -898,9 +1078,12 @@ class DynamicSuGaRModel(SuGaRModel):
 
         geo_solver = pp3d.MeshHeatMethodDistanceSolver(verts_np, faces_np)
 
-        joints_np = np.asarray(self.joints_xyz, dtype=np.float64)
-        self._deform_graph_node_xyz = torch.from_numpy(joints_np).float().to(device)  # [J×3] # naming it like this to be consistent with the rest of the code
-        J = joints_np.shape[0]
+        # joints_np = np.asarray(self.joints_xyz, dtype=np.float64)
+        # self._deform_graph_node_xyz = torch.from_numpy(joints_np).float().to(device)  # [J×3] # naming it like this to be consistent with the rest of the code
+        self._deform_graph_node_xyz = self.joints_xyz
+        J = self._deform_graph_node_xyz.shape[0]
+        
+        joints_np = self.joints_xyz.cpu().numpy()
 
         # Build Open3D point cloud for mesh vertices (to snap joints)
         mesh_pcd = o3d.geometry.PointCloud()
@@ -945,7 +1128,39 @@ class DynamicSuGaRModel(SuGaRModel):
         
         # normalize joint weights
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True))
+        
+    # def calculate_timed_bone_lengths(self, timestamp: Float[Tensor, "N_t"] = None, frame_idx: Int[Tensor, "N_t"] = None):
+    #     """
+    #     Calculate the lengths of the bones based on the joint positions
+    #     """
+    #     # timed_skeleton = self._cached_timed_dg_xyz[dict_temporal_key(timestamp, frame_idx)]
+    #     timed_skeleton = self.get_timed_dg_xyz_attributes(timestamp=timestamp, frame_idx=frame_idx)
+    #     timed_skeleton_lengths = []
+    #     for (p, c) in self.bone_pairs:
+    #         bone_length = torch.norm(timed_skeleton[:, p] - timed_skeleton[:, c], dim=-1)
+    #         timed_skeleton_lengths.append(bone_length.unsqueeze(-1))
+    #     timed_skeleton_lengths = torch.cat(timed_skeleton_lengths, dim=-1)  # Shape: (N_t, N_bones)
+        
+    #     return timed_skeleton_lengths
+    
+    def calculate_timed_bone_lengths(
+        self,
+        timestamp: Float[Tensor, "N_t"] = None,
+        frame_idx: Int[Tensor, "N_t"]  = None,
+    ) -> Float[Tensor, "N_t N_bones"]:
+        """
+        Return current bone lengths for every requested time step.
+        """
+        skel_xyz = self.get_timed_dg_xyz_attributes(timestamp=timestamp,
+                                                    frame_idx=frame_idx)   # (N_t, J, 3)
 
+        p, c     = self.bone_parent_idx, self.bone_child_idx               # (N_bones,)
+        diff     = skel_xyz[:, p] - skel_xyz[:, c]                         # (N_t, N_bones, 3)
+        lengths  = diff.norm(dim=-1)                                       # (N_t, N_bones)
+
+        return lengths
+    
+    # ========= Update step ========= #
         
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         super().update_step(epoch, global_step, on_load_weights)
@@ -958,6 +1173,8 @@ class DynamicSuGaRModel(SuGaRModel):
 
         # debug
         self.global_step = global_step
+        
+        self._cached_timed_dg_xyz = {}
 
 
 

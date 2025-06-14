@@ -49,12 +49,24 @@ class DiffMesh(Rasterizer, GaussianBatchRenderer):
     ) -> None:
         super().configure(geometry, material, background)
         
+        
+    # def project_points(self,
+    #                    points: torch.Tensor,
+    #                    camera: FoVPerspectiveCameras,
+    #                    image_size: Tuple[int, int],
+    #                    ) -> torch.Tensor:
+    #     camera_space_transformation = camera.get_world_to_view_transform()
+    #     points_camera_space = camera_space_transformation.transform_points(points)
+    #     depth = points_camera_space[..., 2]
+        
+    #     points_perspective_division = points_camera_space[..., :2] / (depth.unsqueeze(-1) + 1e-8)
+    #     intrinsic_matrix = camera.(get_projection_transform)
+        
 
     def forward(
         self,
-        **kwargs
+        **batch: Dict[str, Any]
     ) -> Dict[str, Any]:
-        batch = kwargs  # Access the unpacked dictionary
         """
         Render the silhouette and depth of the mesh.
         Should adjust dataloaders to avoid the data operations in the forward function.
@@ -96,17 +108,31 @@ class DiffMesh(Rasterizer, GaussianBatchRenderer):
             shader=SoftSilhouetteShader()
         )
         
-        geometry: DynamicSuGaRModel = self.geometry
-        meshes = geometry.get_timed_surface_mesh(batch['timestamp'], batch['frame_indices'])
+        # geometry: DynamicSuGaRModel = self.geometry
+        meshes_t = batch["timed_surface_mesh"]
+        meshes_t1 = batch["timed_surface_mesh_next"]
                             
-        mask, fragments = renderer_silhouette(meshes)
+        mask, fragments = renderer_silhouette(meshes_t)
         depth = fragments.zbuf[..., 0]
         mask = mask[..., 3].unsqueeze(-1)
         
         depth_mask = depth != -1
         depth[depth_mask] = depth[depth_mask].detach()
         
+        pix_vert_t = camera.transform_points_screen(
+            meshes_t.verts_padded(), 
+            image_size=(batch["height"], batch["width"])
+        )
+        
+        pix_vert_t1 = camera.transform_points_screen(
+            meshes_t1.verts_padded(), 
+            image_size=(batch["height"], batch["width"])
+        )
+        
+        
         return {
             "mesh_comp_mask": mask,
             "mesh_comp_depth": depth,
+            "mesh_pix_vert_t": pix_vert_t[..., :2],
+            "mesh_pix_vert_t1": pix_vert_t1[..., :2],
         }

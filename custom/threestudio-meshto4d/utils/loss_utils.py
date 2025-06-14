@@ -214,6 +214,7 @@ def compute_forward_optical_flow(rgbs: torch.Tensor, device="cuda:0") -> torch.T
 
     N, H, W, _ = rgbs.shape
     flows = []
+    flow_vectors = []
 
     # Compute forward optical flow for each consecutive pair.
     with torch.no_grad():
@@ -226,16 +227,20 @@ def compute_forward_optical_flow(rgbs: torch.Tensor, device="cuda:0") -> torch.T
             # Compute flow magnitude (L2 norm over the 2 channels)
             flow_mag = torch.linalg.norm(flow_vector, dim=-1)  # shape: (H, W)
             flows.append(flow_mag.cpu())
+            flow_vectors.append(flow_vector.cpu())  # Store the flow vector for potential future use
 
     # Duplicate the last computed flow magnitude to match the input frame count.
     if flows:
         flows.append(flows[-1])
+        flow_vectors.append(flow_vectors[-1])  # Duplicate the last flow vector
     else:
         # In case there is only one frame, create a zeros flow.
         flows.append(torch.zeros(H, W))
+        flow_vectors.append(torch.zeros(H, W, 2))
     
     flow_stack = torch.stack(flows, dim=0)  # shape: (N, H, W)
-    return flow_stack
+    flow_vectors_stack = torch.stack(flow_vectors, dim=0)  # shape: (N, H, W, 2)
+    return flow_stack, flow_vectors_stack
 
 def select_key_frames(reliability_maps: torch.Tensor, top_k=4):
     motion_scores = 1 - reliability_maps.mean(dim=(1, 2))  # Higher score = more motion

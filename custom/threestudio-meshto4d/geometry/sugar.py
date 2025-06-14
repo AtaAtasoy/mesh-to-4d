@@ -23,6 +23,8 @@ from pytorch3d.io import load_objs_as_meshes
 from .gaussian_base import SH2RGB, RGB2SH
 from ..utils.sugar_utils import get_one_ring_neighbors
 from ..geometry.mesh_utils import convert_to_textureVertex, calculate_volume
+from plyfile import PlyData, PlyElement
+
 
 
 def inverse_sigmoid(x):
@@ -88,9 +90,7 @@ class SuGaRModel(BaseGeometry):
         else:
             self.binded_to_surface_mesh = False
             self._points = torch.empty(0)
-            
-        if self.cfg.skeleton_pred_path is not None:
-            self.parse_joints_pred(self.cfg.skeleton_pred_path)
+
 
         self.n_gaussians_per_surface_triangle = self.cfg.n_gaussians_per_surface_triangle
 
@@ -754,7 +754,6 @@ def _convert_vertex_colors_to_texture(
         point_idx_per_pixel = point_idx_per_pixel.flip(0)
 
     return faces_uv, verts_uv, texture_img, point_idx_per_pixel
-
 
 # ============= Spherical Harmonics ============ #
 C0 = 0.28209479177387814

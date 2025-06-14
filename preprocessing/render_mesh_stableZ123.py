@@ -15,7 +15,8 @@ from pytorch3d.renderer import (
     RasterizationSettings,
     BlendParams,
     AmbientLights,
-    HardPhongShader
+    HardPhongShader,
+    PointLights
 )
 
 def render_front(mesh_path: str, output_path: str, img_width: int=512, img_height: int=512, azimuth: float=0.0):
@@ -43,7 +44,9 @@ def render_front(mesh_path: str, output_path: str, img_width: int=512, img_heigh
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
 
     # Setup lights
-    lights = AmbientLights(device=device)
+    # lights = AmbientLights(device=device)
+    lights = PointLights(device=device, location=[[0.0, 0.0, 1.0]])
+
 
     # Create renderer
     renderer = MeshRenderer(
