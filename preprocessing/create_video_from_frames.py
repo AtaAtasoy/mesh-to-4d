@@ -10,7 +10,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create video from rendered images')
     parser.add_argument('--input_dir', type=str, required=True, help='Directory containing the inpainted images')
     parser.add_argument('--output_video_path', type=str, required=True, help='Path to save the output video')
-    parser.add_argument('--frame_limit', type=int, default=32, help='Number of frames to include in the video')
+    parser.add_argument('--frame_limit', type=int, default=72, help='Number of frames to include in the video')
     parser.add_argument('--fps', type=int, default=8, help='fps of the output video')
     args = parser.parse_args()
     

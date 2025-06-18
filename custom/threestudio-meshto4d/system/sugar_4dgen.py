@@ -312,7 +312,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                         for img in gt_rgb
                     ]
                     
-                    self.save_image_grid(f"ref_rgb_{self.true_global_step}.png", imgs=comp_rgb)
+                    self.save_image_grid(f"ref_rgb_{self.true_global_step}.png", imgs=gt_rgb)
                     self.save_image_grid(f"comp_rgb_{self.true_global_step}.png", imgs=comp_rgb)
 
             if self.C(self.cfg.loss.lambda_mask) > 0:

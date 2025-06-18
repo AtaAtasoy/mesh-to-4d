@@ -19,8 +19,8 @@ def copy_images_with_stride(input_dir, output_dir, stride=4):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Copy images with a specified stride.")
-    parser.add_argument("input_dir", type=str, help="Path to the input directory containing images.")
-    parser.add_argument("output_dir", type=str, help="Path to the output directory to save images.")
+    parser.add_argument("--input_dir", type=str, help="Path to the input directory containing images.")
+    parser.add_argument("--output_dir", type=str, help="Path to the output directory to save images.")
     parser.add_argument("--stride", type=int, default=4, help="Stride value for selecting images (default: 4).")
 
     args = parser.parse_args()

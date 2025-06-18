@@ -105,7 +105,6 @@ class DiffGaussian(Rasterizer, GaussianBatchRenderer):
 
         pc: DynamicSuGaRModel = self.geometry
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        bg_color = torch.tensor([255., 255., 255.], device="cuda")
         pts = pc.get_xyz
         screenspace_points = (
             torch.zeros_like(
