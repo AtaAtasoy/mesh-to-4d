@@ -777,8 +777,8 @@ class DynamicSuGaRModel(SuGaRModel):
                 )
                 outs["scale"] = deformed_vert_scales
         
-        if self.cfg.deformation_driver == "skeleton":
-            outs["deformed_dg"] = self.get_timed_dg(dg_node_attrs=dg_node_attrs)
+        # if self.cfg.deformation_driver == "skeleton":
+        #     outs["deformed_dg"] = self.get_timed_dg(dg_node_attrs=dg_node_attrs)
             
         return outs
 

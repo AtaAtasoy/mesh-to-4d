@@ -1,6 +1,6 @@
 name: "sugar-dynamic"
 tag: "${data.height}_${rmspace:${basename:${data.video_frames_dir}}_${system.geometry.dynamic_mode},_}"
-exp_root_dir: "outputs/articulation/no-translation-case"
+exp_root_dir: "outputs/20-06-2025-DeformingThings"
 seed: 0
 
 data_type: "temporal-image-datamodule"
@@ -8,21 +8,21 @@ data: # threestudio/data/image.py -> SingleImageDataModuleConfig
   video_frames_dir: ???
   video_length: ???
   norm_timestamp: true
-  num_frames: 16
-  height: 480 
-  width: 480
+  num_frames: 8
+  height: 512 
+  width: 512
   resolution_milestones: [100]
   use_random_camera: True
-  use_video_random_camera:  ${cmaxgt0:${system.loss.lambda_clip_loss}}
-  default_elevation_deg: 0.0
-  default_azimuth_deg: 0.0
-  default_camera_distance: 1.93185165 # Precomputed value of 0.5 / tan(radians(30/2))
-  default_fovy_deg: 30.0
+  use_video_random_camera: false
+  default_elevation_deg: 10.0
+  default_azimuth_deg: 30.0
+  default_camera_distance: 3.8
+  default_fovy_deg: 20.0
   requires_depth: ${cmaxgt0orcmaxgt0:${system.loss.lambda_depth},${system.loss.lambda_depth_rel}}
   requires_normal: ${cmaxgt0:${system.loss.lambda_normal}}
-  requires_flow: ${cmaxgt0:${system.loss.lambda_motion}}
+  use_novel_frames: false
   use_flow_consistency:  ${cmaxgt0:${system.loss.lambda_flow}}
-  use_novel_frames: ${cmaxgt0:${system.loss.lambda_novel_mask}}
+  requires_flow: ${cmaxgt0:${system.loss.lambda_motion}}
   white_background: true
   random_camera: # threestudio/data/uncond.py -> RandomCameraDataModuleConfig
     height: 512
@@ -33,32 +33,7 @@ data: # threestudio/data/image.py -> SingleImageDataModuleConfig
     eval_batch_size: 1
     elevation_range: [-10, 80]
     azimuth_range: [-180, 180]
-    camera_distance_range: [3.8, 3.8] # Precomputed value of 0.5 / tan(radians(30/2))
-    fovy_range: [20.0, 20.0] # Zero123 has fixed fovy
-    progressive_until: 0
-    camera_perturb: 0.0
-    center_perturb: 0.0
-    up_perturb: 0.0
-    light_position_perturb: 1.0
-    light_distance_range: [7.5, 10.0]
-    eval_elevation_deg: ${data.default_elevation_deg}
-    eval_camera_distance: ${data.default_camera_distance}
-    eval_fovy_deg: ${data.default_fovy_deg}
-    light_sample_strategy: "dreamfusion"
-    batch_uniform_azimuth: false
-    n_val_views: 5
-    n_test_views: 5
-    rays_d_normalize: false
-  video_random_camera: # threestudio/data/uncond.py -> RandomCameraDataModuleConfig
-    height: 256
-    width: 256
-    batch_size: 1
-    eval_height: 256
-    eval_width: 256
-    eval_batch_size: 1
-    elevation_range: [-10, 80]
-    azimuth_range: [-180, 180]
-    camera_distance_range: [3.8, 3.8]
+    camera_distance_range: [3.8, 3.8] 
     fovy_range: [20.0, 20.0] # Zero123 has fixed fovy
     progressive_until: 0
     camera_perturb: 0.0
@@ -81,13 +56,12 @@ system:
   # num of frames between two adjacent timestamps for 2d diffusion guidance
   num_inter_frames: 10
   length_inter_frames: 0.1
-  # render_mesh: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
+  render_mesh: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
   # render_mesh_mask: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
-  render_mesh: False
   render_gaussians: ${cmaxgt0:${system.loss.lambda_rgb}}
   # Clip 
-  text_prompt: grazing
-  base_text_prompt: static
+  text_prompt: walking
+  base_text_prompt: standing up
   clip_model: ViT-B/32
   consistency_clip_model: ViT-B/32
   consistency_vit_stride: 8
@@ -97,7 +71,9 @@ system:
   geometry:
     # num of control knots per points(vertices/deformation nodes)
     num_frames: ${data.video_length} # 50
+    use_deform_graph: true
     deformation_driver: skeleton
+
     dynamic_mode: deformation # (deformation / discrete)
 
     n_dg_nodes: 1024
@@ -131,7 +107,6 @@ system:
 
     skeleton_pred_path: ???
     use_shear_matrix: false
-
 
 
   exporter_type: "gaussian-mesh-exporter"
@@ -201,8 +176,8 @@ system:
     lambda_clip: 0.
     lambda_delta_clip: 0.
     lambda_clip_consistency: 0.
-    lambda_rgb: 0.
-    lambda_mask: 1000.
+    lambda_rgb: 5000.
+    lambda_mask: 500.
     lambda_novel_rgb: 0.
     lambda_novel_mask: 0.
     lambda_mesh_rgb: 0.
@@ -247,7 +222,7 @@ system:
         lr: 0.001
 
 trainer:
-  max_steps: 2000
+  max_steps: 3000
   log_every_n_steps: 1
   num_sanity_val_steps: 0
   val_check_interval: ${system.freq.guidance_eval}
