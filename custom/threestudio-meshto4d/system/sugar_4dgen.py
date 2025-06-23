@@ -527,8 +527,9 @@ class SuGaR4DGen(BaseSuGaRSystem):
             #     # loss is the mean of the squared differences
             #     set_loss("motion", F.mse_loss(pred_disp, sampled_flow))
                   
-        elif guidance == "zero123":        
+        elif guidance == "zero123":
             # zero123
+            # sds with gaussian renders
             if self.C(self.cfg.loss.lambda_sds_zero123) > 0:
                 guidance_out, guidance_eval_out = self.guidance_zero123(
                     out["comp_rgb"],
@@ -540,7 +541,13 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 # guidance_eval = guidance_out["guidance_eval"]
                 if guidance_eval:
                     self.save_guidance_eval_images(guidance_eval_out, "zero123", self.true_global_step)
+                    imgs_data = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
+                        for img in out["comp_rgb"]
+                    ]
+                    self.save_image_grid(f"rand_camera_gaussian_{self.true_global_step}.png", imgs=imgs_data)    
             
+            # sds with mesh renders
             if self.C(self.cfg.loss.lambda_sds_mesh_zero123) > 0:
                 guidance_mesh_out, guidance_eval_out = self.guidance_zero123(
                     out["mesh_comp_rgb"],
@@ -549,35 +556,25 @@ class SuGaR4DGen(BaseSuGaRSystem):
                     guidance_eval=guidance_eval,
                 )
                 set_loss("sds_mesh_zero123", guidance_mesh_out["loss_sds"])   
-                     
-                if guidance_eval:
-                    self.save_guidance_eval_images(guidance_eval_out, "zero123", self.true_global_step)
-            
-                    if self.C(self.cfg.loss.lambda_sds_zero123) > 0:
-                        zero123_cond_imgs = out["comp_rgb"]
-                        imgs_data = [
-                            {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
-                            for img in zero123_cond_imgs
-                        ]                    
-                        self.save_image_grid(f"rand_camera_gaussian_{self.true_global_step}.png", imgs=imgs_data)
                     
-                    if self.cfg.loss.lambda_mesh_rgb > 0:
-                        threestudio.info(f"Saving mesh images at {self.true_global_step}")
-                        mesh_rgbs = out["mesh_comp_rgb"]
-                        imgs_data = [
-                            {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
-                            for img in mesh_rgbs
-                        ]
-                        self.save_image_grid(f"rand_camera_mesh_{self.true_global_step}.png", imgs=imgs_data)
-                    if self.cfg.loss.lambda_mesh_mask > 0:
-                        threestudio.info(f"Saving mesh masks at {self.true_global_step}")
-                        mesh_masks = out["mesh_comp_mask"]
-                        imgs_data = [
-                            {"type": "grayscale", "img": mask[..., 0],
-                            "kwargs": {"cmap": None, "data_range": (0, 1)}}
-                            for mask in mesh_masks
-                        ]
-                        self.save_image_grid(f"rand_camera_mesh_mask_{self.true_global_step}.png", imgs=imgs_data)
+                if self.cfg.loss.lambda_mesh_rgb > 0:
+                    threestudio.info(f"Saving mesh images at {self.true_global_step}")
+                    mesh_rgbs = out["mesh_comp_rgb"]
+                    imgs_data = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
+                        for img in mesh_rgbs
+                    ]
+                    self.save_image_grid(f"rand_camera_mesh_{self.true_global_step}.png", imgs=imgs_data)
+                if self.cfg.loss.lambda_mesh_mask > 0:
+                    threestudio.info(f"Saving mesh masks at {self.true_global_step}")
+                    mesh_masks = out["mesh_comp_mask"]
+                    imgs_data = [
+                        {"type": "grayscale", "img": mask[..., 0],
+                        "kwargs": {"cmap": None, "data_range": (0, 1)}}
+                        for mask in mesh_masks
+                    ]
+                    self.save_image_grid(f"rand_camera_mesh_mask_{self.true_global_step}.png", imgs=imgs_data)
+
         elif guidance == "video_diffusion" and self.stage == "refine":
             guidance_inp = out["comp_rgb"]
             

@@ -23,7 +23,7 @@ from .deformation import DeformationNetwork, ModelHiddenParams
 from ..utils.dual_quaternions import DualQuaternion
 from .mesh_utils import calculate_volume
 
-from tqdm import trange
+from tqdm import trange, tqdm
 
 import potpourri3d as pp3d
 
@@ -69,6 +69,7 @@ class DynamicSuGaRModel(SuGaRModel):
         d_rotation: bool = True
         d_opacity: bool = False
         d_scale: bool = True
+        use_shear_matrix: bool = True
 
         dist_mode: str = 'eucdisc'
 
@@ -103,8 +104,11 @@ class DynamicSuGaRModel(SuGaRModel):
                     mode=self.cfg.dist_mode
                 )
             elif self.cfg.deformation_driver == "skeleton":
-                self.parse_joints_pred(self.cfg.skeleton_pred_path)
-                self.build_skeleton_binding(nodes_connectivity=self.cfg.dg_node_connectivity)
+                self.parse_joints_pred_with_skinning(self.cfg.skeleton_pred_path)
+                # self.parse_joints_pred(self.cfg.skeleton_pred_path)
+                # self.build_skeleton_binding_refined(nodes_connectivity=self.cfg.dg_node_connectivity)
+                # self.build_skeleton_binding_refined_project_joints(self.cfg.dg_node_connectivity)
+                self.build_skeleton_binding_with_skinning()
 
         if self.dynamic_mode == "discrete":
             # xyz
@@ -149,7 +153,7 @@ class DynamicSuGaRModel(SuGaRModel):
         elif self.dynamic_mode == "deformation":
             deformation_args = ModelHiddenParams(None)
             deformation_args.no_dr = False
-            deformation_args.no_ds = not (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs")
+            deformation_args.no_ds = not ((self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs") and self.cfg.use_shear_matrix)
             deformation_args.no_do = not (self.cfg.skinning_method == "hybrid")
 
             self._deformation = DeformationNetwork(deformation_args)
@@ -470,7 +474,7 @@ class DynamicSuGaRModel(SuGaRModel):
         )
         timed_attrs["scale"] = torch.cat(
             [attr_dict["scale"] for attr_dict in timed_attr_list], dim=0
-        ) if self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs" else None
+        ) if (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs") and self.cfg.use_shear_matrix else None
         timed_attrs["opacity"] = torch.cat(
             [attr_dict["opacity"] for attr_dict in timed_attr_list], dim=0
         ) if self.cfg.skinning_method == "hybrid" else None
@@ -684,7 +688,7 @@ class DynamicSuGaRModel(SuGaRModel):
 
         # debug time
         # start_time = time.time_ns()
-        if self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs":
+        if (self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs") and self.cfg.use_shear_matrix:
             dg_node_scales = dg_node_attrs.get("scale")
             assert dg_node_scales is not None
 
@@ -694,12 +698,20 @@ class DynamicSuGaRModel(SuGaRModel):
         # deform vertex xyz
         if self.cfg.skinning_method == "lbs" or self.cfg.skinning_method == "hybrid":
             num_pts = self.get_xyz_verts.shape[0]
-
-            deformed_xyz = torch.bmm(
-                neighbor_nodes_scales.reshape(-1, 3, 3),
-                self.get_xyz_verts.unsqueeze(0).unsqueeze(2).unsqueeze(-1).repeat(
-                    n_t, 1, neighbor_nodes_xyz.shape[1], 1, 1).reshape(-1, 3, 1)
-            )
+            if self.cfg.use_shear_matrix:
+                # neighbor_nodes_scales becomes: 1, N_v, N_n, 3, 3
+                neighbor_nodes_scales = neighbor_nodes_scales.reshape(-1, 3, 3)
+                xyz_verts = self.get_xyz_verts.unsqueeze(0).unsqueeze(2).unsqueeze(-1).repeat(n_t, 1, neighbor_nodes_xyz.shape[1], 1, 1).reshape(-1, 3, 1)
+                
+                deformed_xyz = torch.bmm(
+                    neighbor_nodes_scales, xyz_verts
+                )
+                # Deformed xyz has shape N_v * N_n, 3, 1
+            else:
+                deformed_xyz = self.get_xyz_verts.unsqueeze(0).unsqueeze(2).unsqueeze(-1).repeat(
+                    n_t, 1, neighbor_nodes_xyz.shape[1], 1, 1
+                ).reshape(-1, 3, 1)
+                
             deformed_xyz = torch.bmm(
                 neighbor_nodes_rots.matrix().reshape(-1, 3, 3), deformed_xyz
             ).squeeze(-1).reshape(n_t, num_pts, -1, 3)
@@ -1059,6 +1071,125 @@ class DynamicSuGaRModel(SuGaRModel):
         self.register_buffer("bone_parent_idx", p_idx)
         self.register_buffer("bone_child_idx",  c_idx)
         self.register_buffer("rest_bone_lengths", rest_len)
+        
+    def parse_joints_pred_with_skinning(self, rig_file_path: str):
+        """
+        Parses a rig file and sets up joint positions, bone relationships, and skinning information.
+        
+        Args:
+            rig_file_path: Path to the *_rig.txt file containing joint and skinning info
+        """
+        # Data structures to store joint info
+        joints_dict = {}  # Store joint name -> position mapping
+        joint_name_to_idx = {}  # Store joint name -> index mapping
+        bone_pairs = []  # Store parent-child relationships
+        root_joint = None
+        
+        # Data structures to store skinning info
+        vertex_to_joints_weights = {}  # Store vertex -> (joint_indices, weights) mapping
+        max_connectivity = 0  # Track maximum number of influences per vertex
+        
+        # Parse the file once and extract all information
+        with open(rig_file_path, "r") as file:
+            joint_idx = 0
+            for line in file:
+                line = line.strip()
+                if not line or line.startswith("//"):  # Skip empty lines and comments
+                    continue
+                
+                tokens = line.split()
+                
+                if tokens[0] == "joints":
+                    # Format: joints joint_name x y z
+                    joint_name = tokens[1]
+                    x, y, z = map(float, tokens[2:5])
+                    
+                    joints_dict[joint_name] = [x, y, z]
+                    joint_name_to_idx[joint_name] = joint_idx
+                    joint_idx += 1
+                    
+                elif tokens[0] == "root" and len(tokens) > 1:
+                    # Format: root root_joint_name
+                    root_joint = tokens[1]
+                    
+                elif tokens[0] == "hier" and len(tokens) >= 3:
+                    # Format: hier parent_name child_name
+                    parent_name, child_name = tokens[1], tokens[2]
+                    if parent_name in joint_name_to_idx and child_name in joint_name_to_idx:
+                        parent_idx = joint_name_to_idx[parent_name]
+                        child_idx = joint_name_to_idx[child_name]
+                        bone_pairs.append((parent_idx, child_idx))
+                    
+                elif tokens[0] == "skin" and len(tokens) >= 4:
+                    # Format: skin vertex_id joint_name weight [joint_name weight ...]
+                    vertex_id = int(tokens[1])
+                    
+                    # Parse all joint-weight pairs
+                    joint_indices = []
+                    weights = []
+                    i = 2
+                    while i < len(tokens):
+                        joint_name = tokens[i]
+                        if i+1 < len(tokens) and joint_name in joint_name_to_idx:
+                            try:
+                                weight = float(tokens[i+1])
+                                joint_idx = joint_name_to_idx[joint_name]
+                                joint_indices.append(joint_idx)
+                                weights.append(weight)
+                                i += 2
+                            except ValueError:
+                                break  # If we can't convert to float, stop parsing
+                        else:
+                            break
+                    
+                    if joint_indices:  # Only store if we have valid indices
+                        vertex_to_joints_weights[vertex_id] = (joint_indices, weights)
+                        # Update max_connectivity
+                        max_connectivity = max(max_connectivity, len(joint_indices))
+        
+        # Sort joint names to ensure consistent ordering
+        joint_names = sorted(joints_dict.keys(), key=lambda x: joint_name_to_idx[x])
+        
+        # Create a list of joint positions in the correct order
+        positions = [joints_dict[name] for name in joint_names]
+        
+        # Store the joint positions
+        self.joints_xyz = torch.tensor(positions, dtype=torch.float32).to(self.device)
+        self.joint_names = joint_names
+        self.joint_name_to_idx = joint_name_to_idx
+        print(f"Joint positions shape: {self.joints_xyz.shape}")  # J x 3
+        print(f"Maximum connectivity found: {max_connectivity} joints per vertex")
+        
+        # Store skin weights for later use
+        self.vertex_to_joints_weights = vertex_to_joints_weights
+        self.max_connectivity = max_connectivity
+        
+        # Process bone pairs if they exist
+        if bone_pairs:
+            bone_pairs = torch.tensor(bone_pairs, dtype=torch.long)
+            p_idx, c_idx = bone_pairs.t()
+            
+            # Calculate rest bone lengths
+            rest_vec = self.joints_xyz[p_idx] - self.joints_xyz[c_idx]
+            rest_len = rest_vec.norm(dim=-1)
+            
+            # Handle zero-length bones
+            eps = 1e-6
+            if (rest_len < eps).any():
+                from warnings import warn
+                bad = (rest_len < eps).nonzero(as_tuple=False).flatten()
+                warn(
+                    f"{bad.numel()} bones have near-zero length; "
+                    f"clamping them to {eps:.1e} to keep training stable."
+                )
+                rest_len[bad] = eps
+            
+            # Register bone relationship buffers
+            self.register_buffer("bone_parent_idx", p_idx)
+            self.register_buffer("bone_child_idx", c_idx)
+            self.register_buffer("rest_bone_lengths", rest_len)
+        else:
+            print("Warning: No bone hierarchy information found in rig file")
 
         
     def build_skeleton_binding(self, nodes_connectivity: int = 4):
@@ -1128,6 +1259,179 @@ class DynamicSuGaRModel(SuGaRModel):
         
         # normalize joint weights
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True))
+        
+    def build_skeleton_binding_refined(self, nodes_connectivity: int = 4):
+        device = self.device
+        k = nodes_connectivity
+
+        torch3d_mesh = load_objs_as_meshes(
+            [self.cfg.surface_mesh_to_bind_path],
+            device=device
+        )
+        verts_np = torch3d_mesh.verts_list()[0].cpu().numpy()   # [V×3]
+        faces_np = torch3d_mesh.faces_list()[0].cpu().numpy()   # [F×3]
+        V = verts_np.shape[0]
+
+        # The potpourri3d solver is efficient and takes numpy arrays directly.
+        geo_solver = pp3d.MeshHeatMethodDistanceSolver(verts_np, faces_np)
+
+        self._deform_graph_node_xyz = self.joints_xyz
+        joints_np = self.joints_xyz.cpu().numpy()
+        J = joints_np.shape[0]
+
+        # Build a KDTree on mesh vertices to snap joints to the surface
+        mesh_pcd = o3d.geometry.PointCloud()
+        mesh_pcd.points = o3d.utility.Vector3dVector(verts_np)
+        mesh_tree = o3d.geometry.KDTreeFlann(mesh_pcd)
+
+        # For each joint, find the index of the nearest mesh vertex
+        nearest_vertex_indices = np.array([
+            mesh_tree.search_knn_vector_3d(joints_np[i], 1)[1][0]
+            for i in range(J)
+        ])
+
+        # --- OPTIMIZED WEIGHTING LOGIC ---
+
+        # 1. Compute geodesic distances from each snapped joint to all vertices.
+        # This is much faster than looping over all V vertices.
+        all_joint_dists = np.zeros((J, V))
+        for i, vert_idx in enumerate(tqdm(nearest_vertex_indices, desc="Computing geodesic distances from joints")):
+            all_joint_dists[i] = geo_solver.compute_distance(vert_idx)
+
+        # Transpose to get a [V, J] matrix where dists[v, j] is the distance
+        # from vertex v to joint j.
+        dists_from_joints = all_joint_dists.T
+
+        # 2. For each vertex, find the k-nearest joints using vectorized operations.
+        k_nearest_joint_indices = np.argsort(dists_from_joints, axis=1)[:, :k]
+
+        # 3. Get the corresponding geodesic distances for the k-nearest joints.
+        k_nearest_joint_dists = np.take_along_axis(dists_from_joints, k_nearest_joint_indices, axis=1)
+
+        # 4. Compute weights using inverse square distance. Add epsilon for stability.
+        epsilon = 1e-8
+        weights = 1.0 / (k_nearest_joint_dists**2 + epsilon)
+
+        # 5. Convert to PyTorch tensors.
+        self._xyz_neighbor_node_idx = torch.from_numpy(k_nearest_joint_indices).long().to(device)
+        self._xyz_neighbor_nodes_weights = torch.from_numpy(weights).float().to(device)
+
+        # 6. Normalize joint weights so they sum to 1 for each vertex.
+        self._xyz_neighbor_nodes_weights = (
+            self._xyz_neighbor_nodes_weights / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
+        )
+        
+    def build_skeleton_binding_refined_project_joints(self, nodes_connectivity: int = 4):
+        import trimesh
+        device = self.device
+        k = nodes_connectivity
+
+        # --- 1. Load mesh --------------------------------------------------------
+        torch3d_mesh = load_objs_as_meshes(
+            [self.cfg.surface_mesh_to_bind_path],
+            device=device
+        )
+        verts_np = torch3d_mesh.verts_list()[0].cpu().numpy()   # [V×3]
+        faces_np = torch3d_mesh.faces_list()[0].cpu().numpy()   # [F×3]
+        V = verts_np.shape[0]
+
+        # --- 2. Build the heat‐method solver -------------------------------------
+        geo_solver = pp3d.MeshHeatMethodDistanceSolver(verts_np, faces_np)
+
+        # --- 3. Project joints to surface with barycentric coords ----------------
+        joints_np = self.joints_xyz.cpu().numpy()  # [J×3]
+        self._deform_graph_node_xyz = self.joints_xyz # for consistency with the rest of the code
+        J = joints_np.shape[0]
+        mesh_tm   = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
+        
+        # find the closest point on the mesh to each random point
+        closest_pts, distances, triangle_id = mesh_tm.nearest.on_surface(joints_np)
+        # closest_pts: [J×3], distances: [J], triangle_id: [J,]  # closest points on the mesh to each joint
+        # distance from point to surface of mesh distances
+        tri_verts = verts_np[faces_np]   # shape [F, 3, 3]
+
+        # Compute barycentric coords of each closest_pts within its triangle
+        # returns array [J×3] of weights (w0, w1, w2) for v0,v1,v2
+        bary_coords = trimesh.triangles.points_to_barycentric(
+            tri_verts[triangle_id],  # select the triangles for each joint
+            closest_pts              # the projected points
+        )
+
+        # Allocate the blended-distance array
+        dists_from_joints = np.zeros((V, J), dtype=np.float32)
+
+        for j in tqdm(range(J), desc="Geo‐solves & blend"):
+            fidx = int(triangle_id[j])        # index of face under joint j
+            bc   = bary_coords[j]             # e.g. [w0, w1, w2]
+            v0, v1, v2 = faces_np[fidx]       # the three mesh-vertex indices
+
+            # Compute three vertex-seeded geodesic fields
+            d0 = geo_solver.compute_distance(v0)  # [V,]
+            d1 = geo_solver.compute_distance(v1)
+            d2 = geo_solver.compute_distance(v2)
+
+            # Blend by barycentric weights to approximate
+            # geodesic from the true projected point
+            dists_from_joints[:, j] = bc[0]*d0 + bc[1]*d1 + bc[2]*d2
+
+        # --- 5. Find k nearest joints & compute normalized weights ---------------
+        # argsort along J to pick the k smallest distances per vertex
+        k_idx  = np.argsort(dists_from_joints, axis=1)[:, :k]            # [V×k]
+        k_dist = np.take_along_axis(dists_from_joints, k_idx, axis=1)    # [V×k]
+
+        # inverse‐square weighting (with epsilon for stability)
+        eps     = 1e-8
+        weights = 1.0 / (k_dist**2 + eps)        # [V×k]
+        weights = weights / weights.sum(axis=1, keepdims=True)
+
+        # stash in torch
+        self._xyz_neighbor_node_idx      = torch.from_numpy(k_idx).long().to(device)
+        self._xyz_neighbor_nodes_weights = torch.from_numpy(weights).float().to(device)
+
+    def build_skeleton_binding_with_skinning(self):
+        device = self.device
+        k = self.max_connectivity
+
+        torch3d_mesh = load_objs_as_meshes(
+            [self.cfg.surface_mesh_to_bind_path],
+            device=device
+        )
+        verts_np = torch3d_mesh.verts_list()[0].cpu().numpy()   # [V×3]
+        V = verts_np.shape[0]
+
+        self._deform_graph_node_xyz = self.joints_xyz
+
+        # Build a KDTree on mesh vertices to snap joints to the surface
+        mesh_pcd = o3d.geometry.PointCloud()
+        mesh_pcd.points = o3d.utility.Vector3dVector(verts_np)
+        
+        xyz_neighbor_node_idx = np.zeros((V, k), dtype=np.int64)
+        xyz_neighbor_nodes_weights = np.zeros((V, k), dtype=np.float32)
+
+        # --- OPTIMIZED WEIGHTING LOGIC ---
+        vertices_with_weights = np.array(list(self.vertex_to_joints_weights.keys()))
+        
+        for v_idx in tqdm(vertices_with_weights, desc="building skeleton binding with explicit weights"):
+            joint_indices, weights = self.vertex_to_joints_weights[v_idx]
+                        
+            # If we have less than k influences, pad with dummy joints with zero weight
+            if len(joint_indices) < k:
+                # Use the last joint index as padding (with zero weight)
+                pad_joint_idx = 0 if len(joint_indices) == 0 else joint_indices[-1]
+                joint_indices.extend([pad_joint_idx] * (k - len(joint_indices)))
+                weights.extend([0.0] * (k - len(weights)))
+            
+            # Store the joint indices and weights
+            xyz_neighbor_node_idx[v_idx, :] = joint_indices[:k]
+            xyz_neighbor_nodes_weights[v_idx, :] = weights[:k]
+                    
+        self._xyz_neighbor_node_idx = torch.from_numpy(xyz_neighbor_node_idx).long().to(device)
+        self._xyz_neighbor_nodes_weights = torch.from_numpy(xyz_neighbor_nodes_weights).float().to(device)
+        
+        # 10. Final normalization to ensure weights sum to 1 for each vertex
+        self._xyz_neighbor_nodes_weights = (
+            self._xyz_neighbor_nodes_weights / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        )
         
     # def calculate_timed_bone_lengths(self, timestamp: Float[Tensor, "N_t"] = None, frame_idx: Int[Tensor, "N_t"] = None):
     #     """

@@ -54,17 +54,10 @@ for i, azimuth_angle in tqdm(enumerate(azimuth_angles)):
         end = min(start + batch_size, total_meshes)
         batch_meshes = load_objs_as_meshes(mesh_filenames[start:end], device=device)
         
-        
-        azim = torch.tensor([azimuth_angle] * len(batch_meshes), device=device)
-        fixed_fovy_deg = 30.0
-        dist = 0.5 / torch.sin(torch.deg2rad(torch.tensor(fixed_fovy_deg / 2)))
-        elev = torch.tensor([0] * len(batch_meshes), device=device)
-        camera_distances = torch.full_like(elev, dist)
+        R, T = look_at_view_transform(dist=3.8, elev=5.0, azim=azimuth_angle)
+        cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=20.0)
 
-        R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim, device=device)
-        cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fixed_fovy_deg)
-
-        lights = PointLights(device=device, location=[[0.0, 0.0, 3.0]])
+        lights = PointLights(device=device, location=[[0.0, 0.0, 1.0]])
 
         renderer = MeshRenderer(
             rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),

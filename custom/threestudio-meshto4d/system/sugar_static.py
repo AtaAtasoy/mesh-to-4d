@@ -533,6 +533,6 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
         pc_save_path = os.path.join(
             self.get_save_dir(), f"exported_gs_step{self.global_step}.ply"
         )
-        self.geometry.save_ply(pc_save_path)
+        # self.geometry.save_ply(pc_save_path)
         self.export_mesh(format="ply")
 
