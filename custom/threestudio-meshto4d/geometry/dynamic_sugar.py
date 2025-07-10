@@ -107,8 +107,8 @@ class DynamicSuGaRModel(SuGaRModel):
                 self.parse_joints_pred_with_skinning(self.cfg.skeleton_pred_path)
                 # self.parse_joints_pred(self.cfg.skeleton_pred_path)
                 # self.build_skeleton_binding_refined(nodes_connectivity=self.cfg.dg_node_connectivity)
-                # self.build_skeleton_binding_refined_project_joints(self.cfg.dg_node_connectivity)
-                self.build_skeleton_binding_with_skinning()
+                self.build_skeleton_binding_refined_project_joints(self.cfg.dg_node_connectivity)
+                # self.build_skeleton_binding_with_skinning()
 
         if self.dynamic_mode == "discrete":
             # xyz
@@ -1345,10 +1345,10 @@ class DynamicSuGaRModel(SuGaRModel):
         mesh_tm   = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
         
         # find the closest point on the mesh to each random point
-        closest_pts, distances, triangle_id = mesh_tm.nearest.on_surface(joints_np)
+        closest_pts, _, triangle_id = mesh_tm.nearest.on_surface(joints_np)
         # closest_pts: [J×3], distances: [J], triangle_id: [J,]  # closest points on the mesh to each joint
         # distance from point to surface of mesh distances
-        tri_verts = verts_np[faces_np]   # shape [F, 3, 3]
+        tri_verts = verts_np[faces_np]   # shape [F, 3, 3], location of the triangle vertices
 
         # Compute barycentric coords of each closest_pts within its triangle
         # returns array [J×3] of weights (w0, w1, w2) for v0,v1,v2
@@ -1376,18 +1376,29 @@ class DynamicSuGaRModel(SuGaRModel):
 
         # --- 5. Find k nearest joints & compute normalized weights ---------------
         # argsort along J to pick the k smallest distances per vertex
-        k_idx  = np.argsort(dists_from_joints, axis=1)[:, :k]            # [V×k]
-        k_dist = np.take_along_axis(dists_from_joints, k_idx, axis=1)    # [V×k]
+        idx_kplus1 = np.argsort(dists_from_joints, axis=1)[:, :k+1]      # [V×(k+1)]
+        d_kplus1   = np.take_along_axis(dists_from_joints, idx_kplus1, axis=1)  # [V×(k+1)]
 
-        # inverse‐square weighting (with epsilon for stability)
-        eps     = 1e-8
-        weights = 1.0 / (k_dist**2 + eps)        # [V×k]
-        weights = weights / weights.sum(axis=1, keepdims=True)
+        # 2) separate the (k+1)-th radius from the first k:
+        k_idx      = idx_kplus1[:, :k]      # [V×k], the k nearest
+        radii      = d_kplus1[:, -1]        # [V],    the (k+1)-th distance
 
-        # stash in torch
+        # 3) gather the first k distances:
+        k_dist     = d_kplus1[:, :k]        # [V×k]
+
+        # 4) compute bump weights:
+        # w_ij = (1 - d_ij / radii_i)^2, ensuring radii_i>0
+        eps = 1e-12
+        ratios = k_dist / (radii[:, None] + eps)
+        w = (1.0 - ratios)**2               # [V×k]
+
+        # 5) normalize per vertex so sum_j w_ij = 1
+        w = w / (w.sum(axis=1, keepdims=True) + eps)
+
+        # 6) stash back into torch:
         self._xyz_neighbor_node_idx      = torch.from_numpy(k_idx).long().to(device)
-        self._xyz_neighbor_nodes_weights = torch.from_numpy(weights).float().to(device)
-
+        self._xyz_neighbor_nodes_weights = torch.from_numpy(w).float().to(device)
+    
     def build_skeleton_binding_with_skinning(self):
         device = self.device
         k = self.max_connectivity

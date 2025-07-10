@@ -27,7 +27,8 @@ class GaussianBatchRenderer:
                 "mesh_comp_mask": render_pkg["mesh_comp_mask"],
                 "mesh_comp_depth": render_pkg["mesh_comp_depth"],
                 "mesh_pix_vert_t": render_pkg["mesh_pix_vert_t"],
-                "mesh_pix_vert_t1": render_pkg["mesh_pix_vert_t1"],
+                # "mesh_pix_vert_t1": render_pkg["mesh_pix_vert_t1"],
+                "mesh_comp_rgb": render_pkg["mesh_comp_rgb"],
             })
         else:                   
             for batch_idx in range(bs):
