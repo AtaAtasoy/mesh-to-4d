@@ -1023,8 +1023,7 @@ class DynamicSuGaRModel(SuGaRModel):
         self._xyz_neighbor_nodes_weights = torch.stack(xyz_neighbor_nodes_weights).to(device)
         # normalize
         self._xyz_neighbor_nodes_weights = (self._xyz_neighbor_nodes_weights
-                                            / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True)
-                                            )
+                                            / self._xyz_neighbor_nodes_weights.sum(dim=-1, keepdim=True))
     # ======== Skeleton binding ======== #
     def parse_joints_pred(self, joints_pred_path: str):
         positions = []
