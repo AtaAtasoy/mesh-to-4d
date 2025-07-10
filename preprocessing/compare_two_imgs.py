@@ -1,10 +1,8 @@
+#!/usr/bin/env python3
 import argparse
 import sys
 import numpy as np
 from PIL import Image
-
-#!/usr/bin/env python3
-
 def main():
     parser = argparse.ArgumentParser(
         description="Compute absolute pixel-wise difference between two images and save the result."
