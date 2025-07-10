@@ -574,9 +574,8 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 set_loss("sds_mesh_zero123", guidance_mesh_out["loss_sds"]) 
                 if guidance_eval:
                     self.save_guidance_eval_images(guidance_eval_out, "mesh_zero123", self.true_global_step)
-                                        
-                if self.cfg.loss.lambda_mesh_rgb > 0:
-                    if guidance_eval:
+                    
+                    if self.cfg.loss.lambda_mesh_rgb > 0:
                         threestudio.info(f"Saving mesh images at {self.true_global_step}")
                         mesh_rgbs = out["mesh_comp_rgb"]
                         imgs_data = [
