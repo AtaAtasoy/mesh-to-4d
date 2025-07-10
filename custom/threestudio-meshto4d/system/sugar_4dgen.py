@@ -27,6 +27,7 @@ from ..utils.loss_utils import weighted_mse_loss, temporal_smoothness_loss, cosi
 import clip
 from ..utils.clip_spatial import CLIPVisualEncoder
 from ..utils.resize_right import resize, cubic
+import flow_vis_torch
 
 
 @threestudio.register("sugar-4dgen-system")
@@ -98,6 +99,17 @@ class SuGaR4DGen(BaseSuGaRSystem):
             batch["timed_surface_mesh"] = self.geometry.get_timed_surface_mesh(
                     timestamp=batch["timestamp"], frame_idx=batch["frame_indices"]
                 )
+            # if loss.lambda_flow > 0 
+            # we should load t + 1 meshes of meshes at
+            # t which is defined in batch["timed_surface_mesh"]
+            if self.cfg.loss.lambda_motion > 0:
+                timestamps_next = batch["timestamp"] + 1 / (self.geometry.num_frames + 1)
+                frame_indices_next = batch["frame_indices"] + 1
+                batch["timed_surface_mesh_next"] = self.geometry.get_timed_surface_mesh(
+                    timestamp=timestamps_next,
+                    frame_idx=frame_indices_next
+                )
+                    
         if self.cfg.render_gaussians:
             batch["render_gaussians"] = True
         if self.cfg.loss.lambda_mesh_rgb > 0:
@@ -283,10 +295,12 @@ class SuGaR4DGen(BaseSuGaRSystem):
                     if len(reliability_maps.shape) == 3:
                         reliability_maps = reliability_maps.unsqueeze(-1)
                         
-                    if self.true_global_step % 200 == 0: 
-                        save_image(reliability_maps.permute(0, 3, 1, 2), f"reliability_map_{self.true_global_step}.png")
+                    reliability_maps = reliability_maps * gt_mask.float()
                         
-                    set_loss("rgb", weighted_mse_loss(gt_rgb, out["comp_rgb"], reliability_maps * gt_mask.float()))
+                    if guidance_eval: 
+                        save_image(reliability_maps.permute(0, 3, 1, 2), self.get_save_path(f"reliability_map_{self.true_global_step}.png"), normalize=True)
+                        
+                    set_loss("rgb", weighted_mse_loss(gt_rgb, out["comp_rgb"], reliability_maps))
                 if guidance_eval:
                     comp_rgb = [
                         {"type": "rgb", "img": img, "kwargs": {"data_range": (0, 1)}}
@@ -298,7 +312,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                         for img in gt_rgb
                     ]
                     
-                    self.save_image_grid(f"ref_rgb_{self.true_global_step}.png", imgs=comp_rgb)
+                    self.save_image_grid(f"ref_rgb_{self.true_global_step}.png", imgs=gt_rgb)
                     self.save_image_grid(f"comp_rgb_{self.true_global_step}.png", imgs=comp_rgb)
 
             if self.C(self.cfg.loss.lambda_mask) > 0:
@@ -346,6 +360,22 @@ class SuGaR4DGen(BaseSuGaRSystem):
                     if self.true_global_step % 200 == 0: 
                         save_image(reliability_maps.permute(0, 3, 1, 2), f"reliability_map_{self.true_global_step}.png")
                     set_loss("mesh_rgb", weighted_mse_loss(gt_rgb, out["mesh_comp_rgb"], reliability_maps * gt_mask.float()))
+                
+                if guidance_eval:
+                    threestudio.info(f"Saving mesh images at {self.true_global_step}")
+                    
+                    mesh_comp_rgb = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_range": (0, 1)}}
+                        for img in out["mesh_comp_rgb"]
+                    ]
+                    
+                    gt_rgb = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_range": (0, 1)}}
+                        for img in gt_rgb
+                    ]
+                    
+                    self.save_image_grid(f"ref_rgb_{self.true_global_step}.png", imgs=gt_rgb)
+                    self.save_image_grid(f"mesh_comp_rgb_{self.true_global_step}.png", imgs=mesh_comp_rgb)
 
             # depth loss
             if self.C(self.cfg.loss.lambda_depth) > 0:
@@ -465,8 +495,57 @@ class SuGaR4DGen(BaseSuGaRSystem):
                         "mesh_edge",
                         mesh_edge_loss(surface_meshes)
                     )
-        elif guidance == "zero123":        
+            
+            # if self.C(self.cfg.loss.lambda_motion) > 0:
+            #     B, H, W, _ = out["mesh_comp_mask"].shape # B, H, W, 1
+            #     B, N = out["mesh_pix_vert_t"].shape[:2] # N = number_of_vertices
+            #     pix_vert_t = out["mesh_pix_vert_t"] # B, N, 2
+            #     pix_vert_t1 = out["mesh_pix_vert_t1"] # B, N, 2
+                
+            #     raft_optical_flow = batch["optical_flow_vectors"] # B, H, W, 2
+                
+            #     # Mask the raft optical flow
+            #     raft_optical_flow *= gt_mask.float()
+                
+            #     x_norm = (pix_vert_t[..., 0] / (W - 1)) * 2.0 - 1.0    # (B,N)
+            #     y_norm = (pix_vert_t[..., 1] / (H - 1)) * 2.0 - 1.0
+            #     grid   = torch.stack([x_norm, y_norm], dim=-1)     # (B,N,2)
+            #     grid   = grid.view(B, N, 1, 2)                     # (B,N,1,2)
+
+            #     flow_tensor  = raft_optical_flow.permute(0, 3, 1, 2)           # (B,2,H,W)
+            #     sampled_flow = F.grid_sample(flow_tensor,
+            #                                 grid,
+            #                                 mode='bilinear',
+            #                                 align_corners=True)   # (B,2,N,1)
+            #     sampled_flow = sampled_flow.squeeze(-1).permute(0, 2, 1)  # (B,N,2)
+
+            #     pred_disp = pix_vert_t1 - pix_vert_t  # (B,N,2)
+                
+            #     if guidance_eval:
+            #         for i, b in enumerate(range(B)):
+            #             flow_img_pred = torch.ones((H, W, 2), device=pred_disp.device)
+            #             flow_img_sampled = torch.ones((H, W, 2), device=sampled_flow.device)
+            #             # mask_img = torch.zeros((H, W), device=pred_disp.device)
+                        
+                        
+            #             x = pix_vert_t[b, :, 0].round().long().clamp(0, W - 1)
+            #             y = pix_vert_t[b, :, 1].round().long().clamp(0, H - 1)
+            #             flow_img_pred[y, x] = pred_disp[b]
+            #             flow_img_sampled[y, x] = sampled_flow[b]
+            #             # mask_img[y, x] = 1
+                        
+            #             flow_vis_pred = flow_vis_torch.flow_to_color(flow_img_pred.permute(2, 0, 1).unsqueeze(0))[0]
+            #             flow_vis_sampled = flow_vis_torch.flow_to_color(flow_img_sampled.permute(2, 0, 1).unsqueeze(0))[0]
+                        
+            #             save_image(flow_vis_pred.float(), self.get_save_path(f"flow_vis_pred_{self.true_global_step}_{i}.png"), normalize=True)
+            #             save_image(flow_vis_sampled.float(), self.get_save_path(f"flow_vis_sampled_{self.true_global_step}_{i}.png"), normalize=True)
+                                        
+            #     # loss is the mean of the squared differences
+            #     set_loss("motion", F.mse_loss(pred_disp, sampled_flow))
+                  
+        elif guidance == "zero123":
             # zero123
+            # sds with gaussian renders
             if self.C(self.cfg.loss.lambda_sds_zero123) > 0:
                 guidance_out, guidance_eval_out = self.guidance_zero123(
                     out["comp_rgb"],
@@ -478,26 +557,23 @@ class SuGaR4DGen(BaseSuGaRSystem):
                 # guidance_eval = guidance_out["guidance_eval"]
                 if guidance_eval:
                     self.save_guidance_eval_images(guidance_eval_out, "zero123", self.true_global_step)
+                    imgs_data = [
+                        {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
+                        for img in out["comp_rgb"]
+                    ]
+                    self.save_image_grid(f"rand_camera_gaussian_{self.true_global_step}.png", imgs=imgs_data)    
             
-            if self.C(self.cfg.loss.lambda_sds_mesh_zero123) > 0:
+            # sds with mesh renders
+            if self.C(self.cfg.loss.lambda_sds_mesh_zero123) > 0:                
                 guidance_mesh_out, guidance_eval_out = self.guidance_zero123(
                     out["mesh_comp_rgb"],
                     **batch,
                     rgb_as_latents=False,
                     guidance_eval=guidance_eval,
                 )
-                set_loss("sds_mesh_zero123", guidance_mesh_out["loss_sds"])   
-                     
+                set_loss("sds_mesh_zero123", guidance_mesh_out["loss_sds"]) 
                 if guidance_eval:
-                    self.save_guidance_eval_images(guidance_eval_out, "zero123", self.true_global_step)
-            
-                    if self.C(self.cfg.loss.lambda_sds_zero123) > 0:
-                        zero123_cond_imgs = out["comp_rgb"]
-                        imgs_data = [
-                            {"type": "rgb", "img": img, "kwargs": {"data_format": "HWC"}}
-                            for img in zero123_cond_imgs
-                        ]                    
-                        self.save_image_grid(f"rand_camera_gaussian_{self.true_global_step}.png", imgs=imgs_data)
+                    self.save_guidance_eval_images(guidance_eval_out, "mesh_zero123", self.true_global_step)
                     
                     if self.cfg.loss.lambda_mesh_rgb > 0:
                         threestudio.info(f"Saving mesh images at {self.true_global_step}")
@@ -507,7 +583,9 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             for img in mesh_rgbs
                         ]
                         self.save_image_grid(f"rand_camera_mesh_{self.true_global_step}.png", imgs=imgs_data)
-                    if self.cfg.loss.lambda_mesh_mask > 0:
+                if self.cfg.loss.lambda_mesh_mask > 0:
+                    if guidance_eval:
+                        
                         threestudio.info(f"Saving mesh masks at {self.true_global_step}")
                         mesh_masks = out["mesh_comp_mask"]
                         imgs_data = [
@@ -516,6 +594,7 @@ class SuGaR4DGen(BaseSuGaRSystem):
                             for mask in mesh_masks
                         ]
                         self.save_image_grid(f"rand_camera_mesh_mask_{self.true_global_step}.png", imgs=imgs_data)
+
         elif guidance == "video_diffusion" and self.stage == "refine":
             guidance_inp = out["comp_rgb"]
             
@@ -734,7 +813,21 @@ class SuGaR4DGen(BaseSuGaRSystem):
             
             volume_loss_l2 = torch.square(base_mesh_volume - timed_mesh_volumes).mean()
             set_loss("mesh_volume_loss_l2", volume_loss_l2)
-        
+            
+        if self.cfg.loss.lambda_bone_length_consistency > 0:
+            # current_bone_lengths = self.geometry.calculate_timed_bone_lengths(tgt_timestamp, tgt_frame_idx)
+            # rest_bone_lengths = self.geometry.rest_bone_lengths 
+            
+            cur_len  = self.geometry.calculate_timed_bone_lengths(tgt_timestamp, tgt_frame_idx)  # (B,N_bones)
+            rest_len = self.geometry.rest_bone_lengths.unsqueeze(0)                              # (1,N_bones)
+
+            rel_err  = (cur_len - rest_len) / (rest_len + 1e-8)    # relative error
+            bone_length_loss = (rel_err ** 2).mean()
+            
+            # Mean squared error between current and rest bone lengths
+            # bone_length_loss = torch.square(current_bone_lengths - rest_bone_lengths).mean()
+            set_loss("bone_length_consistency", bone_length_loss)
+                    
     def on_train_batch_start(self, batch, batch_idx, unused=0):
         super().on_train_batch_start(batch, batch_idx, unused)
 

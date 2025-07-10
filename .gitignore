@@ -201,3 +201,6 @@ input/
 
 
 *.sh
+tracked_video
+tracked_video_frames
+cow_tracked_frames

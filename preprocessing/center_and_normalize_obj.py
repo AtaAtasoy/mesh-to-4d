@@ -32,7 +32,7 @@ def center_and_normalize_to_unit_sphere(verts):
     
     # Scale to unit sphere
     max_distance = torch.norm(verts_centered, dim=1).max()
-    verts_normalized = verts_centered / (2 * max_distance)  # Scale to fit within radius 0.5
+    verts_normalized = verts_centered / max_distance # Scale to unit sphere
         
     return verts_normalized
  
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     # 1. Load source mesh with textures
     verts, faces, aux = load_obj(args.mesh_path, load_textures=True)
     
-    verts = center_and_normalize_to_unit_sphere(verts)
+    verts = center_and_normalize_to_unit_cube(verts)
     
     # 3. Save the new mesh, reusing the original MTL/textures
     save_obj_with_textures(

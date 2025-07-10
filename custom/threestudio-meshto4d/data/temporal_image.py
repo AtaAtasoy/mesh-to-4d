@@ -45,6 +45,7 @@ class TemporalRandomImageDataModuleConfig(SingleImageDataModuleConfig):
     use_novel_frames: bool = True
     use_video_random_camera: bool = True
     requires_flow: bool = False
+    use_flow_consistency: bool = False
     video_random_camera: dict = field(default_factory=dict)
     use_fixed_pose_camera: bool = True
     fixed_pose_camera: dict = field(default_factory=dict)
@@ -344,17 +345,20 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
         if self.cfg.use_novel_frames:
             novel_frames_path = self.cfg.video_frames_dir.replace("video_frames", "novel_frames")
             self.novel_frame_rgbs, self.novel_frame_masks = load_novel_frames(novel_frames_path=novel_frames_path, video_length=self.video_length, number_of_novel_frames=6)
-            # self.flow_reliability = compute_reliability_map(self.rgbs)
-            # self.key_frame_indices = select_key_frames(self.flow_reliability, top_k=8)
-            # threestudio.info(f"[INFO] selected key frame indices: {self.key_frame_indices}")
         
-        if self.cfg.requires_flow:
+        if self.cfg.use_flow_consistency:
             if not hasattr(self, 'flow_reliability'):
                 self.flow_reliability = compute_reliability_map(self.rgbs)
+            else:
+                self.flow_reliability = None
+
+        
+        
+        if self.cfg.requires_flow:
             if not hasattr(self, 'optical_flows'):
-                self.optical_flows = compute_forward_optical_flow(self.rgbs)
+                self.optical_flows_magnitudes, self.optical_flow_vectors = compute_forward_optical_flow(self.rgbs)
         else:
-            self.flow_reliability = None
+            self.optical_flows_magnitudes, self.optical_flow_vectors = None, None
 
     def get_all_images(self):
         return self.rgbs
@@ -583,7 +587,9 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
             "rgb": self.rgbs[rand_frame_idx],
             "ref_depth": self.depths[rand_frame_idx] if self.depths is not None else None,
             "ref_normal": self.normals[rand_frame_idx] if self.normals is not None else None,
-            "reliability_map": self.flow_reliability[rand_frame_idx] if self.flow_reliability is not None else None,
+            "reliability_map": self.flow_reliability[rand_frame_idx] if self.cfg.use_flow_consistency else None,
+            "optical_flow_mags": self.optical_flows_magnitudes[rand_frame_idx] if self.optical_flows_magnitudes is not None else None,
+            "optical_flow_vectors": self.optical_flow_vectors[rand_frame_idx] if self.optical_flow_vectors is not None else None,
             "mask": self.masks[rand_frame_idx],
             "height": self.height,
             "width": self.width,

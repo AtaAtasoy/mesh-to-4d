@@ -1,6 +1,6 @@
 name: "sugar-dynamic"
 tag: "${data.height}_${rmspace:${basename:${data.video_frames_dir}}_${system.geometry.dynamic_mode},_}"
-exp_root_dir: "outputs/26-06-25-no-normal-consistency"
+exp_root_dir: "outputs/mesh-rendering"
 seed: 0
 
 data_type: "temporal-image-datamodule"
@@ -8,9 +8,9 @@ data: # threestudio/data/image.py -> SingleImageDataModuleConfig
   video_frames_dir: ???
   video_length: ???
   norm_timestamp: true
-  num_frames: 8
-  height: 480 
-  width: 480
+  num_frames: 4
+  height: 320 
+  width: 320
   resolution_milestones: [100]
   use_random_camera: True
   use_video_random_camera:  ${cmaxgt0:${system.loss.lambda_clip_loss}}
@@ -25,11 +25,11 @@ data: # threestudio/data/image.py -> SingleImageDataModuleConfig
   use_novel_frames: ${cmaxgt0:${system.loss.lambda_novel_mask}}
   white_background: true
   random_camera: # threestudio/data/uncond.py -> RandomCameraDataModuleConfig
-    height: 480
-    width: 480
+    height: 256
+    width: 256
     batch_size: 1
-    eval_height: 480
-    eval_width: 480
+    eval_height: 256
+    eval_width: 256
     eval_batch_size: 1
     elevation_range: [-10, 80]
     azimuth_range: [-180, 180]
@@ -81,9 +81,9 @@ system:
   # num of frames between two adjacent timestamps for 2d diffusion guidance
   num_inter_frames: 10
   length_inter_frames: 0.1
-  # render_mesh: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
+  render_mesh: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
   # render_mesh_mask: ${cmaxgt0:${system.loss.lambda_mesh_mask}}
-  render_mesh: False
+  # render_mesh: False
   render_gaussians: ${cmaxgt0:${system.loss.lambda_rgb}}
   # Clip 
   text_prompt: grazing
@@ -135,7 +135,7 @@ system:
 
 
   exporter_type: "gaussian-mesh-exporter"
-  renderer_type: "diff-sugar-rasterizer-temporal"
+  renderer_type: "diff-mesh-rasterizer"
   renderer:
     debug: false
     invert_bg_prob: 1.0

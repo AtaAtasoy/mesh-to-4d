@@ -529,12 +529,13 @@ class SuGaRStaticSystem(BaseSuGaRSystem):
             step=self.true_global_step,
         )
 
-        # Save the current mesh as .ply file
+        pc_save_path = os.path.join(
+            self.get_save_dir(), f"exported_gs_step{self.global_step}.ply"
+        )
         if self.stage == "gaussian":
-            pc_save_path = os.path.join(
-                self.get_save_dir(), f"exported_gs_step{self.global_step}.ply"
-            )
             self.geometry.save_ply(pc_save_path)
         else:
+            refiend_gaussians = self.geometry.convert_refined_sugar_into_gaussians()
+            refiend_gaussians.save_ply(pc_save_path)
             self.export_mesh(format="ply")
 

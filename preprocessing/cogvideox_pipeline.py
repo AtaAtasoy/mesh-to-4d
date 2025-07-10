@@ -11,7 +11,7 @@ import os
 import random
 
 # @torch.compile()
-def generate_video(image_path: str, prompt: str, negative_prompt: str="Excessive streching. Unrealistic. Streching.", num_videos_per_prompt: int=4, output_dir: str="output"):
+def generate_video(image_path: str, prompt: str, negative_prompt: str="Unrealistic. Distortion. Blurry.", num_videos_per_prompt: int=4, output_dir: str="output"):
     quantization = int8_weight_only
 
     text_encoder = T5EncoderModel.from_pretrained("THUDM/CogVideoX1.5-5B-I2V", subfolder="text_encoder", torch_dtype=torch.bfloat16)
@@ -35,6 +35,8 @@ def generate_video(image_path: str, prompt: str, negative_prompt: str="Excessive
     pipe.enable_sequential_cpu_offload()
     pipe.vae.enable_tiling()
     pipe.vae.enable_slicing()
+    
+    print(f"Using prompt: {prompt}")
 
     image = load_image(image=image_path)
     videos = pipe(

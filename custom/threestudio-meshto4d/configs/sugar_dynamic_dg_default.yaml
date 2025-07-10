@@ -1,6 +1,6 @@
 name: "sugar-dynamic"
 tag: "${data.height}_${rmspace:${basename:${data.video_frames_dir}}_${system.geometry.dynamic_mode},_}"
-exp_root_dir: "outputs/high_sds"
+exp_root_dir: "outputs/26-06-25-no-normal-consistency"
 seed: 0
 
 data_type: "temporal-image-datamodule"
@@ -8,27 +8,30 @@ data: # threestudio/data/image.py -> SingleImageDataModuleConfig
   video_frames_dir: ???
   video_length: ???
   norm_timestamp: true
-  num_frames: 8
-  height: 512 
-  width: 512
+  num_frames: 16
+  height: 480 
+  width: 480
   resolution_milestones: [100]
   use_random_camera: True
   use_video_random_camera: false
   default_elevation_deg: 5.0
   default_azimuth_deg: 0.0
-  default_camera_distance: 3.8
+  default_camera_distance: 2.8
   default_fovy_deg: 20.0
   requires_depth: ${cmaxgt0orcmaxgt0:${system.loss.lambda_depth},${system.loss.lambda_depth_rel}}
   requires_normal: ${cmaxgt0:${system.loss.lambda_normal}}
   use_novel_frames: false
+  use_flow_consistency:  ${cmaxgt0:${system.loss.lambda_flow}}
+  requires_flow: ${cmaxgt0:${system.loss.lambda_motion}}
+  white_background: true
   random_camera: # threestudio/data/uncond.py -> RandomCameraDataModuleConfig
-    height: 512
-    width: 512
+    height: 480
+    width: 480
     batch_size: 1
-    eval_height: 512
-    eval_width: 512
+    eval_height: 480
+    eval_width: 480
     eval_batch_size: 1
-    elevation_range: [0.0, 0.0]
+    elevation_range: [-10, 80]
     azimuth_range: [-180, 180]
     camera_distance_range: [3.8, 3.8] 
     fovy_range: [20.0, 20.0] # Zero123 has fixed fovy
@@ -69,6 +72,8 @@ system:
     # num of control knots per points(vertices/deformation nodes)
     num_frames: ${data.video_length} # 50
     use_deform_graph: true
+    deformation_driver: skeleton
+
     dynamic_mode: deformation # (deformation / discrete)
 
     n_dg_nodes: 1024
@@ -93,19 +98,22 @@ system:
     spatial_lr_scale: 1
 
     surface_mesh_to_bind_path: ???
-    n_gaussians_per_surface_triangle: 6
+    n_gaussians_per_surface_triangle: 1
 
     dist_mode: "geodisc" # (eucdisc / geodisc)
     skinning_method: "hybrid"
 
     use_extra_features: false
 
+    skeleton_pred_path: ???
+    use_shear_matrix: false
+
   exporter_type: "gaussian-mesh-exporter"
   renderer_type: "diff-sugar-rasterizer-temporal"
   renderer:
     debug: false
     invert_bg_prob: 1.0
-    back_ground_color: [0.0, 0.0, 0.0]
+    back_ground_color: [1.0, 1.0, 1.0]
 
   material_type: "no-material" # unused
   material:
@@ -148,7 +156,7 @@ system:
 
   freq:
     ref_only_steps: 0
-    guidance_eval: 200
+    guidance_eval: 1000
     inter_frame_reg: 0
     milestone_arap_reg: 100
 
@@ -159,7 +167,7 @@ system:
       name: mesh-to-4d
 
   loss:
-    lambda_sds_zero123: 1.
+    lambda_sds_zero123: 0.1
     lambda_sds_mesh_zero123: 0.
     lambda_sds_2d: 0.
     lambda_sds_2d_img: 0.
@@ -179,7 +187,7 @@ system:
     lambda_normal_smooth: 0.
     lambda_normal_consistency: 10. 
     lambda_normal_depth_consistency: 0. 
-    lambda_laplacian_smoothing: 1.
+    lambda_laplacian_smoothing: 0.
     lambda_arap_reg_key_frame: 10.
     lambda_arap_reg_inter_frame: 10.
     lambda_ref_xyz: 0.
@@ -198,6 +206,8 @@ system:
     
     # object centric reg
     lambda_obj_centric: 0.
+    lambda_bone_length_consistency: 0.
+    lambda_motion: 0.
 
 
   optimizer:
