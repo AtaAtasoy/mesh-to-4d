@@ -315,7 +315,10 @@ class Deformation(nn.Module):
         self.skips = skips
 
         self.no_grid = args.no_grid  # False
-        self.grid = HexPlaneField(args.bounds, args.kplanes_config, args.multires)
+        if self.no_grid:
+            self.grid = None
+        else:
+            self.grid = HexPlaneField(args.bounds, args.kplanes_config, args.multires)
 
         self.use_res = use_res
         if not self.use_res:
@@ -368,18 +371,13 @@ class Deformation(nn.Module):
                 Head_Res_Net(self.W, 1)
 
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_emb):
-        if not self.use_res:
-            if self.no_grid:
-                h = torch.cat([rays_pts_emb[:, :3], time_emb[:, :1]], -1)
-            else:
-                grid_feature = self.grid(rays_pts_emb[:, :3], time_emb[:, :1])
-
-                h = grid_feature
-
-            h = self.feature_out(h)
+        if self.no_grid:
+            h = torch.cat([rays_pts_emb[:, :3], time_emb[:, :1]], -1)
         else:
             grid_feature = self.grid(rays_pts_emb[:, :3], time_emb[:, :1])
-            h = self.feature_out(grid_feature)
+            h = grid_feature
+            
+        h = self.feature_out(h)
         return h
 
     def forward(self, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity=None, time_emb=None):
@@ -459,7 +457,7 @@ class Deformation(nn.Module):
         return parameter_list
 
     def get_grid_parameters(self):
-        return list(self.grid.parameters())
+        return list(self.grid.parameters()) if self.grid is not None else []
     # + list(self.timegrid.parameters())
 
 

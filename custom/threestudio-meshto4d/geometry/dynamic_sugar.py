@@ -155,6 +155,7 @@ class DynamicSuGaRModel(SuGaRModel):
             deformation_args.no_dr = False
             deformation_args.no_ds = not ((self.cfg.d_scale or self.cfg.skinning_method == "hybrid" or self.cfg.skinning_method == "lbs") and self.cfg.use_shear_matrix)
             deformation_args.no_do = not (self.cfg.skinning_method == "hybrid")
+            deformation_args.no_grid = False  # No grid for deformation network
 
             self._deformation = DeformationNetwork(deformation_args)
             self._deformation_table = torch.empty(0)

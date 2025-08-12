@@ -46,4 +46,5 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, help="Directory to save the extracted frames")
     args = parser.parse_args()
 
+    os.makedirs(args.output_path, exist_ok=True)
     extract_frames(args.video_path, args.output_path)

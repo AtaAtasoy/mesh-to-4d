@@ -233,91 +233,92 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
         )
 
         # load depth
-        if self.cfg.requires_depth:
-            depth_path = frame_path.replace("video_frames", "depth_frames").replace(".png", ".npy")
-            assert os.path.exists(depth_path)
-            # depth = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
+        # if self.cfg.requires_depth:
+        #     depth_path = frame_path.replace("video_frames", "depth_frames").replace(".png", ".npy")
+        #     assert os.path.exists(depth_path)
+        #     # depth = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
 
-            # depth = cv2.resize(
-            #     depth, (self.width, self.height), interpolation=cv2.INTER_AREA
-            # )
-            # depth: Float[Tensor, "1 H W 1"] = (
-            #     torch.from_numpy(depth.astype(np.float32) / 255.0)
-            #     .unsqueeze(0)
-            #     .unsqueeze(-1)
-            #     # .to(self.rank)
-            # )
+        #     # depth = cv2.resize(
+        #     #     depth, (self.width, self.height), interpolation=cv2.INTER_AREA
+        #     # )
+        #     # depth: Float[Tensor, "1 H W 1"] = (
+        #     #     torch.from_numpy(depth.astype(np.float32) / 255.0)
+        #     #     .unsqueeze(0)
+        #     #     .unsqueeze(-1)
+        #     #     # .to(self.rank)
+        #     # )
                         
-            # self.depths.append(depth)
-            # print(
-            #     f"[INFO] single image dataset: load depth {depth_path} {depth.shape}"
-            # )
-            depth_np = np.load(depth_path)
-            depth_tensor = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0).unsqueeze(-1)
-            print(f"Info] single image dataset: load normal {depth_path} {depth_tensor.shape}")
+        #     # self.depths.append(depth)
+        #     # print(
+        #     #     f"[INFO] single image dataset: load depth {depth_path} {depth.shape}"
+        #     # )
+        #     depth_np = np.load(depth_path)
+        #     depth_tensor = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0).unsqueeze(-1)
+        #     print(f"Info] single image dataset: load normal {depth_path} {depth_tensor.shape}")
 
-            self.depths.append(depth_tensor)
+        #     self.depths.append(depth_tensor)
 
-        # load normal
-        if self.cfg.requires_normal:
-            normal_path = frame_path.replace("video_frames", "normal_frames").replace(".png", ".npy")
-            assert os.path.exists(normal_path)
-            # normal = cv2.imread(normal_path, cv2.IMREAD_UNCHANGED)
-            # normal = cv2.resize(
-            #     normal, (self.width, self.height), interpolation=cv2.INTER_AREA
-            # )
-            # normal: Float[Tensor, "1 H W 3"] = (
-            #     torch.from_numpy(normal.astype(np.float32) / 255.0)
-            #     .unsqueeze(0)
-            # )
-            # self.normals.append(normal)
-            # print(
-            #     f"[INFO] single image dataset: load normal {normal_path} {normal.shape}"
-            # )
-            normal_np = np.load(normal_path)
-            normal_tensor = torch.from_numpy(normal_np.astype(np.float32)).unsqueeze(0)
-            print(f"Info] single image dataset: load normal {normal_path} {normal_tensor.shape}")
-            self.normals.append(normal_tensor)
+        # # load normal
+        # if self.cfg.requires_normal:
+        #     normal_path = frame_path.replace("video_frames", "normal_frames").replace(".png", ".npy")
+        #     assert os.path.exists(normal_path)
+        #     # normal = cv2.imread(normal_path, cv2.IMREAD_UNCHANGED)
+        #     # normal = cv2.resize(
+        #     #     normal, (self.width, self.height), interpolation=cv2.INTER_AREA
+        #     # )
+        #     # normal: Float[Tensor, "1 H W 3"] = (
+        #     #     torch.from_numpy(normal.astype(np.float32) / 255.0)
+        #     #     .unsqueeze(0)
+        #     # )
+        #     # self.normals.append(normal)
+        #     # print(
+        #     #     f"[INFO] single image dataset: load normal {normal_path} {normal.shape}"
+        #     # )
+        #     normal_np = np.load(normal_path)
+        #     normal_tensor = torch.from_numpy(normal_np.astype(np.float32)).unsqueeze(0)
+        #     print(f"Info] single image dataset: load normal {normal_path} {normal_tensor.shape}")
+        #     self.normals.append(normal_tensor)
 
     def load_video_frames(self):
         assert os.path.exists(self.cfg.video_frames_dir), f"Could not find image {self.cfg.video_frames_dir}!"
         self.rgbs = []
         self.masks = []
         
-        # if self.cfg.requires_depth:
-        #     input_dir = os.path.dirname(self.cfg.video_frames_dir)
-        #     video_name = os.path.basename(self.cfg.video_frames_dir)
-
-        #     depth_folder = input_dir.replace("video_frames", "depths")  
-        #     depth_np = np.load(os.path.join(depth_folder, f"{video_name}_pred.npy"))
-            
-        #     # depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np))
-            
-        #     self.depths = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(-1)
-        # else:
-        #     self.depths = None
-            
-            
-        # if self.cfg.requires_normal:
-        #     input_dir = os.path.dirname(self.cfg.video_frames_dir)
-        #     video_name = os.path.basename(self.cfg.video_frames_dir)
-
-        #     normal_folder = input_dir.replace("video_frames", "normals")  
-        #     normal_npz = np.load(os.path.join(normal_folder, f"{video_name}_pred.npz"))
-        #     normals = normal_npz["depth"]
-        #     self.normals = torch.from_numpy(normals.astype(np.float32))
-        # else:
-        #     self.normals = None
-            
         if self.cfg.requires_depth:
-            self.depths = []
+            input_dir = os.path.dirname(self.cfg.video_frames_dir)
+            video_name = os.path.basename(self.cfg.video_frames_dir)
+
+            depth_folder = input_dir.replace("video_frames", "depths")  
+            depth_np = np.load(os.path.join(depth_folder, f"{video_name}.npy"))
+            
+            # depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np))
+            
+            self.depths = torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(-1)
         else:
             self.depths = None
             
+            
         if self.cfg.requires_normal:
-            self.normals = []
+            input_dir = os.path.dirname(self.cfg.video_frames_dir)
+            video_name = os.path.basename(self.cfg.video_frames_dir)
+
+            normal_folder = input_dir.replace("video_frames", "normals")  
+            threestudio.info(f"Loading normals from {normal_folder} for video {video_name}")
+            normal_npz = np.load(os.path.join(normal_folder, f"{video_name}.npz"))
+            normals = normal_npz["depth"]
+            self.normals = torch.from_numpy(normals.astype(np.float32))
         else:
             self.normals = None
+            
+        # if self.cfg.requires_depth:
+        #     self.depths = []
+        # else:
+        #     self.depths = None
+            
+        # if self.cfg.requires_normal:
+        #     self.normals = []
+        # else:
+        #     self.normals = None
 
         # all_frame_paths = glob.glob(os.path.join(self.cfg.video_frames_dir, "*.png"))
         # self.video_length = len(all_frame_paths)
@@ -332,15 +333,15 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
 
         self.rgbs = torch.cat(self.rgbs, dim=0)
         self.masks = torch.cat(self.masks, dim=0)
-        if self.cfg.requires_depth:
-            self.depths = torch.cat(self.depths, dim=0)
-        else:
-            self.depths = None
+        # if self.cfg.requires_depth:
+        #     self.depths = torch.cat(self.depths, dim=0)
+        # else:
+        #     self.depths = None
 
-        if self.cfg.requires_normal:
-            self.normals = torch.cat(self.normals, dim=0)
-        else:
-            self.normals = None
+        # if self.cfg.requires_normal:
+        #     self.normals = torch.cat(self.normals, dim=0)
+        # else:
+        #     self.normals = None
         
         if self.cfg.use_novel_frames:
             novel_frames_path = self.cfg.video_frames_dir.replace("video_frames", "novel_frames")
@@ -499,7 +500,6 @@ class TemporalRandomImageIterableDataset(IterableDataset, Updateable):
 
         # default scene center at origin
         center: Float[Tensor, "B 3"] = torch.zeros_like(camera_positions)
-        # default camera up direction as +z
         up: Float[Tensor, "B 3"] = torch.as_tensor([0, 1, 0], dtype=torch.float32)[
             None, :
         ].repeat(n_views, 1)
